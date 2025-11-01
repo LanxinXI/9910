@@ -1,0 +1,628 @@
+---
+title: "DEA and data cleaning"
+author: "LANXIN XI"
+date: "`r Sys.Date()`"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(readr)
+library(janitor)
+library(patchwork)
+library(naniar)
+library(forcats)
+library(comorbidity)
+library(scales)
+library(mice)
+library(ggcorrplot)
+library(ggpubr)
+```
+
+## Data loading and preparation
+
+```{r Data loading}
+admissions <- readr::read_csv("../data/mimic_data/admissions.csv")
+patients <- readr::read_csv("../data/mimic_data/patients.csv")
+icustays <- readr::read_csv("../data/mimic_data/icustays.csv")
+pt_icu_outcome <- readr::read_csv("../data/mimic_data/pt_icu_outcome.csv")
+transfers <- readr::read_csv("../data/mimic_data/transfers.csv")
+pt_weight <- readr::read_csv("../data/mimic_data/pt_weight.csv")
+vitals_hourly <- readr::read_csv("../data/mimic_data/vitals_hourly.csv")
+gcs_hourly <- readr::read_csv("../data/mimic_data/gcs_hourly.csv")
+pv_mechvent <- readr::read_csv("../data/mimic_data/pv_mechvent.csv")
+labs_hourly <- readr::read_csv("../data/mimic_data/labs_hourly.csv")
+output_hourly <- readr::read_csv("../data/mimic_data/output_hourly.csv")
+icd9_diag <- readr::read_csv("../data/mimic_data/icd9_diag.csv")
+
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+```{r}
+
+summary(vitals_hourly)
+```
+
+
+```{r Link the main data tables}
+data_merge <- pt_icu_outcome |>
+  # Link the data tables
+  left_join(
+    icustays |> select(icustay_id, first_careunit),
+    by = "icustay_id"
+  ) |>
+  mutate(
+    icu_type = as.factor(first_careunit)
+  ) |>
+  
+  left_join(
+    patients |> select(subject_id, gender),
+    by = "subject_id"
+  ) |>
+  
+  left_join(
+    admissions |> select(hadm_id, admission_type, insurance, ethnicity),
+    by = "hadm_id"
+  ) |>
+
+  # Retain the first ICU records
+  group_by(subject_id) |>
+  slice_min(intime, n =1, with_ties = FALSE) |>
+  ungroup() |>
+
+  # Filter records of patients age >= 18
+  filter(age_years >= 18) |>
+    
+  # Ensure exist of hospital outcome
+  filter(!is.na(hospital_expire_flag)) |>
+  
+  mutate(
+    death = as.factor(hospital_expire_flag), 
+    gender = as.factor(gender),               
+    insurance = as.factor(insurance),         
+    ethnicity = as.factor(ethnicity),         
+    admission_type = as.factor(admission_type)
+  )
+
+```
+
+# 处理混杂变量
+混杂因素必须在暴露（ICU 类型的分配）之前或在分配时测量。
+select the variabels values measured within 24 hours before and after icu stay
+### GCS 
+
+The minimum with 24 hr
+```{r gcs}
+summary(gcs_hourly)
+
+gcs_24hr_min <- gcs_hourly |>
+  filter(hr >= 0 & hr <= 24) |>  # Filter gcs score within 24hr
+  group_by(icustay_id) |>
+  summarise(
+    min_gcs_24h = min(gcs, na.rm = TRUE) # Extract the minimum gcs within 24hr
+  ) |>
+  ungroup()
+
+```
+
+### Bedside measurements
+
+```{r}
+vital_24hr <- vitals_hourly |>
+  filter(hr >= 0 & hr <= 24) |>
+  group_by(icustay_id) |>
+  summarise(
+    min_map_24h = min(meanarterialpressure, na.rm = TRUE),
+    min_sysbp_24h = min(sysbp, na.rm = TRUE),
+    max_hr_24h = max(heartrate, na.rm = TRUE),
+    max_resp_24h = max(resprate, na.rm = TRUE),
+    min_temp_24h = min(temperature, na.rm = TRUE),
+    max_temp_24h = max(temperature, na.rm = TRUE),
+    max_glucose_24h = min(glucose, na.rm = TRUE),
+    min_spo2_24h = min(spo2, na.rm = TRUE),
+    
+  ) |>
+  ungroup()
+
+summary(vital_24hr)
+
+```
+
+### lab measurements
+```{r}
+lab_24hr <- labs_hourly |>
+  filter(hr >= -24 & hr <= 24 ) |>
+  group_by(icustay_id) |>
+  summarise(
+    max_creatinine_24h = max(creatinine, na.rm = TRUE),
+    min_platelets_24h = min(platelets, na.rm = TRUE),
+    max_bilirubin_24h = max(bilirubin, na.rm = TRUE)
+  )
+```
+### Mechanical ventilation
+```{r}
+# Extract 24hr mechanical ventilation application
+mechvent_24h_subset <- pv_mechvent |> 
+  inner_join(data_merge |> select(icustay_id, intime), by = "icustay_id") |>
+  mutate(
+    time_from_intime = as.numeric(difftime(starttime, intime, units = "hours"))
+  ) |>
+  filter(time_from_intime >= 0 & time_from_intime <= 24)
+
+# Create a binary variable 
+mv_flag_24hr <- mechvent_24h_subset %>%
+  group_by(icustay_id) %>%
+  summarise(
+    is_ventilated_24hr_count = n()
+  ) %>%
+  ungroup() %>%
+  mutate(
+    is_ventilated_24h = 1
+  ) %>%
+  select(icustay_id, is_ventilated_24h)
+```
+
+### Comorbidity
+```{r}
+icd9_diag <- as.data.frame(icd9_diag)
+icd9_diag$hadm_id <- as.character(icd9_diag$hadm_id)
+icd9_diag$icd9_code <- gsub("\\.", "", icd9_diag$icd9_code) 
+icd9_diag$icd9_code <- as.character(icd9_diag$icd9_code)
+icd9_for_comorb <- icd9_diag[grepl("^[0-9]", icd9_diag$icd9_code), ]
+```
+
+```{r}
+elixhauser <- comorbidity(
+  x = icd9_for_comorb,
+  id = "hadm_id",
+  code = "icd9_code",
+  map = "elixhauser_icd9_quan",
+  assign0 = TRUE
+)
+
+```
+
+```{r}
+comorbidity_groups <- elixhauser %>%
+  mutate(
+    Comorb_Cardio = as.integer(chf == 1 | carit == 1 | valv == 1 | pcd == 1 | pvd == 1),
+    Comorb_Renal = as.integer(rf == 1),
+    Comorb_Pulm = as.integer(hypunc == 1 | hypc == 1), 
+    Comorb_Diabetes = as.integer(diabunc == 1 | diabc == 1),
+    Comorb_Cancer = as.integer(solidtum == 1 | metacanc == 1 | lymph == 1),
+    Comorb_Liver = as.integer(ld == 1),
+    Comorb_Other = as.integer(aids == 1 | rheumd == 1)
+  ) %>%
+  select(hadm_id, Comorb_Cardio, Comorb_Renal, Comorb_Pulm, Comorb_Diabetes, Comorb_Cancer, Comorb_Liver, Comorb_Other)
+
+comorbidity_groups$hadm_id = as.numeric(comorbidity_groups$hadm_id)
+comorbidity_groups$Comorb_Cardio = as.factor(comorbidity_groups$Comorb_Cardio)
+comorbidity_groups$Comorb_Renal = as.factor(comorbidity_groups$Comorb_Renal)
+comorbidity_groups$Comorb_Pulm = as.factor(comorbidity_groups$Comorb_Pulm)
+comorbidity_groups$Comorb_Diabetes = as.factor(comorbidity_groups$Comorb_Diabetes)
+comorbidity_groups$Comorb_Cancer = as.factor(comorbidity_groups$Comorb_Cancer)
+comorbidity_groups$Comorb_Liver = as.factor(comorbidity_groups$Comorb_Liver)
+comorbidity_groups$Comorb_Other = as.factor(comorbidity_groups$Comorb_Other)
+
+head(comorbidity_groups)
+
+```
+
+```{r Create the analysis dataframe for Question 1}
+# Select useful variables from the "data_merge"
+data_analysis <- data_merge |>
+  select(subject_id, hadm_id, icustay_id, age_years, gender, icu_type, admission_type, insurance, ethnicity, death) |>
+  # Add the confounder variables to the dataframe
+  left_join(gcs_24hr_min, by = "icustay_id") |>
+  left_join(vital_24hr, by = "icustay_id") |>
+  left_join(lab_24hr, by = "icustay_id") |>
+  left_join(mv_flag_24hr, by = "icustay_id") |>
+  left_join(comorbidity_groups, by = "hadm_id") |>
+  mutate(
+    is_ventilated_24h = replace_na(is_ventilated_24h, 0),
+    across(ends_with("_24h"),
+           ~ case_when(
+             is.infinite(.) ~ NA_real_,
+             TRUE ~.
+           )),
+    is_ventilated_24h = as.factor(is_ventilated_24h),
+    
+    # Recode the ethnicity
+    ethnicity = case_when(
+      str_detect(ethnicity, "WHITE") ~ "WHITE",
+      str_detect(ethnicity, "BLACK|AFRICAN AMERICAN") ~ "BLACK",
+      str_detect(ethnicity, "HISPANIC|LATINO") ~ "HISPANIC",
+      TRUE ~ "OTHER/UNKNOWN"
+    ),
+    ethnicity = as.factor(ethnicity)
+  )
+```
+
+
+
+# Urine output
+决定不使用尿量，因为那些不不存在的记录无法判断是真的没有排放还是忘记进行记录
+
+
+This is all variables used in Question 1 to modelling
+
+## EDA and further preprocessing
+
+### Sanity check 
+```{r}
+# Sanity check
+dim(data_analysis)
+str(data_analysis)
+summary(data_analysis)
+```
+
+### Check missing values
+```{r Visualize the missing values}
+####################################################
+#            Visualize the missing values          #
+####################################################
+
+# Initialize a data frame
+missing_report_final <- data.frame(
+  variable = character(),
+  na_count = numeric(),
+  na_percent = character(),
+  stringsAsFactors = FALSE
+)
+
+# A loop to count missing values in all variables
+for (col_name in names(data_analysis)) {
+  current_col <- data_analysis[[col_name]]
+  
+  count <- sum(is.na(current_col))
+  
+  ratio <- mean(is.na(current_col))
+  
+  new_row <- data.frame(
+    variable = col_name,
+    na_count = count,
+    na_percent = scales::percent(ratio, accuracy = 0.1),
+    stringsAsFactors = FALSE
+  )
+  
+  missing_report_final <- bind_rows(missing_report_final, new_row)
+}
+
+missing_report_final <- missing_report_final %>%
+  arrange(desc(na_count))
+
+print(missing_report_final)
+```
+
+### Check the distribution of all variables
+
+```{r}
+#################################################
+# Check the distribution of continuous variables#
+#################################################
+con_vars <- c("age_years", "min_gcs_24h", "min_map_24h", "min_sysbp_24h", 
+              "max_hr_24h", "max_resp_24h", "min_temp_24h", "max_temp_24h", 
+              "max_glucose_24h", "min_spo2_24h", "max_creatinine_24h", "min_platelets_24h",
+              "max_bilirubin_24h" )
+
+for (var in  con_vars){
+  plot_data <- data_analysis |>
+    filter(!is.na(!!sym(var)))
+  
+  if (nrow(plot_data) > 10) {
+    p <- ggplot(plot_data, aes(x =!!sym(var))) +
+      geom_histogram(aes(y = after_stat(density)), bins = 30, fill = "#0072B2", alpha = 0.7) +
+      geom_density(color = "orange", linewidth = 1) +
+      labs(
+        title = paste("Distribution:", var, "(No NA)"),
+        subtitle = paste("Observations:", nrow(plot_data)),
+        x = var, 
+        y = "Density"
+      ) +
+      theme_minimal()
+    
+    print(p)
+  } else
+    cat(paste(var, "has no more than 10 observations with values."))
+}
+```
+```{r}
+#################################################
+# Check the distribution of categorical variables#
+#################################################
+cat_vars <- c("icu_type", "gender", "admission_type", "insurance", "ethnicity", 
+              "death", "is_ventilated_24h", "Comorb_Cardio", "Comorb_Renal", 
+              "Comorb_Pulm", "Comorb_Diabetes", "Comorb_Cancer", "Comorb_Liver", 
+              "Comorb_Other" )
+
+
+format_percent <- function(x, digits = 1){
+  paste0(round(x * 100, digits), "%")
+}
+
+for (var in cat_vars) {
+  freq_table <- table(data_analysis[[var]], useNA = "always")
+  prop_table <- prop.table(freq_table)
+  
+  report <- data.frame(
+    Category = names(freq_table),
+    Count = as.vector(freq_table),
+    Percent = format_percent(as.vector(prop_table)),
+    stringsAsFactors = FALSE
+  )
+  
+  
+  print(report, row.names = FALSE)
+}
+```
+
+### Check the correlation between continuous variables
+
+```{r}
+var_order <- colnames(cor_mat)                # 锁定顺序
+cor_df <- as.data.frame(cor_mat)
+cor_df$var1 <- rownames(cor_df)
+
+cor_long <- cor_df |>
+  pivot_longer(-var1, names_to = "var2", values_to = "corr") |>
+  mutate(
+    var1 = factor(var1, levels = rev(var_order)),  # y 轴反转
+    var2 = factor(var2, levels = var_order)
+  )
+
+ggplot(cor_long, aes(var2, var1, fill = corr)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sprintf("%.2f", corr)), size = 3) +
+  scale_fill_gradient2(low = "#B2182B", mid = "white", high = "#2166AC", limits=c(-1,1)) +
+  coord_fixed() +
+  labs(x="", y="", title="Spearman Correlation (Original Data)") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle=45, hjust=1))
+```
+
+### Relationship between in-hospital outcome and continuous variables
+```{r}
+data_analysis |>
+  select(death, all_of(con_vars)) |>
+  pivot_longer(cols = -death, names_to = "variable", values_to = "value") |>
+  ggplot(aes(x=death, y=value, fill =death)) +
+  geom_boxplot(outlier.alpha = 0.2) +
+  facet_wrap(~variable, scales="free", ncol = 4)+
+  theme_bw() +
+  labs(
+    title = "Key vital signs and lab results by Mortality"
+  )
+```
+
+
+```{r}
+vars_demo <- c("age_years")
+vars_hemo <- c("min_map_24h","min_sysbp_24h","max_hr_24h")
+vars_resp <- c("max_resp_24h","min_spo2_24h")
+vars_temp <- c("min_temp_24h","max_temp_24h")
+vars_lab  <- c("max_glucose_24h","max_creatinine_24h","min_platelets_24h","max_bilirubin_24h")
+vars_neuro <- c("min_gcs_24h")
+
+make_box <- function(df, vars, title){
+  df %>%
+    select(death, all_of(vars)) %>%
+    pivot_longer(-death, names_to="variable", values_to="value") %>%
+    ggplot(aes(x=factor(death), y=value, fill=factor(death))) +
+    geom_violin(trim=FALSE, alpha=0.3) +
+    geom_boxplot(width=0.2, outlier.alpha = 0.2) +
+    stat_compare_means(method="wilcox.test", label="p.signif") +
+    facet_wrap(~variable, scales="free", ncol=3) +
+    scale_fill_manual(values=c("#E57373","#4DB6AC")) +
+    labs(title=title, x="Death", y="Value") +
+    theme_bw(base_size=12) +
+    theme(legend.position="none",
+          strip.text = element_text(face="bold"))
+}
+
+make_box(data_analysis, vars_demo, "Demographics")
+make_box(data_analysis, vars_hemo, "Hemodynamic Variables")
+make_box(data_analysis, vars_resp, "Respiratory Variables")
+make_box(data_analysis, vars_temp, "Temperature Variables")
+make_box(data_analysis, vars_lab,  "Laboratory Results")
+make_box(data_analysis, vars_neuro,"Neurologic Status")
+```
+
+### ICU Type vs in-hospital outcome
+```{r}
+data_analysis %>%
+  group_by(icu_type) %>%
+  summarise(
+    mortality = mean(ifelse(death == 1, 1, 0)) * 100,
+    n = n()
+  ) %>%
+  arrange(desc(mortality))
+```
+
+
+### 
+
+### 检查缺失机制
+
+```{r}
+vis_miss(data_analysis, warn_large_data = FALSE) 
+
+```
+
+```{r}
+library(UpSetR)
+vars_high <- c("min_temp_24h","max_temp_24h","max_glucose_24h",
+               "max_resp_24h","min_sysbp_24h","min_map_24h",
+               "max_hr_24h","min_spo2_24h","max_bilirubin_24h")
+
+library(corrplot)
+
+mat <- is.na(data_analysis[vars_high]) * 1
+corr <- cor(mat)
+corrplot(corr, method = "color", tl.col="black", tl.cex = 0.8)
+```
+
+```{r}
+# Check the missing pattern
+vars_test <- c("min_map_24h","min_spo2_24h","max_hr_24h","max_resp_24h","min_sysbp_24h","max_glucose_24h", "min_temp_24h", "max_temp_24h", "max_bilirubin_24h")
+
+for(v in vars_test){
+  data_analysis[[paste0("miss_",v)]] <- as.integer(is.na(data_analysis[[v]]))
+  print(v)
+  print(summary(glm(data_analysis[[paste0("miss_",v)]] ~ death + icu_type + age_years,
+                    data=data_analysis, family=binomial)))
+}
+
+```
+vital signs 的缺失没有明显的机制， 可能是前24小时的记录窗口缺失,采用MICE
+
+`bilirubin`的缺失是临床选择的结果，不是随机缺失。
+
+
+
+The confounders are constructed based on SOFA/APACHE indicators. Although the high missing ratio, the variables are important potential confounders that reflecting the severity of the disease, clinical decision-making, and the intensity of monitoring.
+
+### Imputation
+
+Remove the observations with missing values in comorbidity-related variables.
+```{r}
+data_analysis_ <- data_analysis %>% 
+  filter(!if_any(starts_with("Comorb_"), is.na))
+```
+
+```{r}
+# Remove 'max_bilirubin_24h'
+data_imp <- data_analysis_ |>
+  mutate(
+    miss_bilirubin = ifelse(is.na(max_bilirubin_24h), 1, 0), # Missing flag
+    max_bilirubin_24h_imp = ifelse(is.na(max_bilirubin_24h),
+                                   median(max_bilirubin_24h, na.rm= TRUE),
+                                   max_bilirubin_24h)
+  ) |>
+  select(-max_bilirubin_24h)
+```
+
+```{r}
+# Select the variables need MICE
+var_mice <- c("min_temp_24h","max_temp_24h","max_glucose_24h",
+  "max_resp_24h","min_sysbp_24h","min_map_24h",
+  "max_hr_24h","min_spo2_24h",
+  "min_gcs_24h","min_platelets_24h","max_creatinine_24h")
+```
+
+```{r}
+set.seed(42)
+imp <- mice(
+  data_imp, 
+  m = 5,
+  method = "pmm",
+  maxit = 10,
+  predictormatrix = quickpred(data_imp,
+                              exclude = c("death", "miss_bili", "icu_type", "ethnicity", "age_years", "gender", "admission_type", "insurance", "subject_id", "icustay_id", "hadm_id")),
+  seed = 123
+  )
+
+data_mice <- complete(imp)
+```
+```{r}
+plot(imp)
+```
+
+```{r}
+check_var <- "max_creatinine_24h"
+
+orig <- data_imp[[check_var]]
+impv  <- data_mice[[check_var]]
+
+df_check <- data.frame(
+  value = c(orig, impv),
+  type = rep(c("Original","Imputed"), each = length(orig))
+)
+
+ggplot(df_check, aes(value, fill = type)) + 
+  geom_density(alpha = 0.4) + 
+  ggtitle(paste("Distribution Check for", check_var))
+```
+
+
+```{r}
+data_analysis_1 <- data_analysis_ |>
+  mutate(bili_raw = max_bilirubin_24h,
+         bili_log = ifelse(!is.na(max_bilirubin_24h),
+                           log1p(max_bilirubin_24h), NA_real_),
+         miss_bili = as.integer(is.na(max_bilirubin_24h)))
+
+bili_ref = data_analysis_1 |>
+  group_by(icu_type) |>
+  summarise(bili_log_ref = median(bili_log, na.rm = TRUE), .groups = "drop")
+
+data_analysis_1 <- data_analysis_1 |>
+  left_join(bili_ref, by = "icu_type") |>
+  mutate(
+    bili_log_filled = ifelse(is.na(bili_log), bili_log_ref, bili_log)
+  )
+```
+
+```{r}
+data_final_imputed <- data_mice |>
+  bind_cols(data_analysis_1 |>
+              select(bili_raw, bili_log, miss_bili, bili_log_filled)) |>
+  mutate(death = data_analysis$death)
+  
+```
+
+MICE 大失败
+
+### 保守填补并创建缺失标识
+```{r}
+data_ready <- data_analysis |>
+  mutate(
+    min_temp_24h_missing_flag = is.na(min_temp_24h),
+    max_temp_24h_missing_flag = is.na(max_temp_24h),
+    max_glucose_24h_missing_flag = is.na(max_glucose_24h),
+    max_resp_24h_missing_flag = is.na(max_resp_24h),
+    min_sysbp_24h_missing_flag = is.na(min_sysbp_24h),
+    min_map_24h_missing_flag = is.na(min_map_24h),
+    max_hr_24h_missing_flag = is.na(max_hr_24h),
+    min_spo2_24h_missing_flag = is.na(min_spo2_24h),
+    min_gcs_24h_24h_missing_flag = is.na(min_gcs_24h_24h),
+    min_platelets_24h_missing_flag = is.na(min_platelets_24h),
+    max_creatinine_24h_missing_flag = is.na(max_creatinine_24h),
+    
+  )
+```
+
+
+
+
+## Question 1
+Main model: with imputed data 
+```{r}
+formula_model <- death ~ icu_type + age_years + gender + ethnicity + min_gcs_24h + min_platelets_24h + max_creatinine_24h + min_map_24h + max_hr_24h + min_spo2_24h + max_resp_24h +
+    min_sysbp_24h + min_temp_24h + max_temp_24h + max_glucose_24h + bili_log_filled + miss_bili
+model_main <- glm(formula_model, data = data_final_imputed, family = binomial())
+
+summary(model_main)
+
+```
+
+
+### modelling with samples with complete values
+```{r}
+df_complete <- na.omit(data_analysis)
+
+formula_model <- death ~ icu_type + age_years + gender + ethnicity + min_gcs_24h + min_platelets_24h + max_creatinine_24h + min_map_24h + max_hr_24h + min_spo2_24h + max_resp_24h + min_sysbp_24h + min_temp_24h + max_temp_24h + max_glucose_24h + max_bilirubin_24h + is_ventilated_24h + Comorb_Cardio + Comorb_Renal + Comorb_Pulm + Comorb_Diabetes + Comorb_Cancer + Comorb_Other+Comorb_Liver 
+model_complete <- glm(formula_model, data = df_complete, family = binomial())
+
+summary(model_complete)
+```
+```{r}
+df_complete <- na.omit(data_analysis)
+
+formula_model <- death ~ icu_type + age_years + gender + ethnicity + min_gcs_24h + min_platelets_24h + max_creatinine_24h + min_map_24h + max_hr_24h + min_spo2_24h + max_resp_24h + min_sysbp_24h + min_temp_24h + max_temp_24h + max_glucose_24h + max_bilirubin_24h + is_ventilated_24h + Comorb_Cardio + Comorb_Renal + Comorb_Pulm + Comorb_Diabetes + Comorb_Cancer + Comorb_Other+Comorb_Liver 
+model_complete <- glm(formula_model, data = df_complete, family = binomial())
+
+summary(model_complete)
+```
+
+
