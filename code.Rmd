@@ -43,7 +43,8 @@ library(caret)
 #  Methods
 2.1 Data source and cohort
 
-MIMIC-III v1.4 [9] (Medical Information Mart for Intensive Care III) is the data set that will be used in the research. MIMIC-III is a large, freely-available database comprising health related data associated with patients who stayed within ICUs of the Beth Israel Deaconess Medical Center during the period 2001-2012.
+MIMIC-III v1.4 [9] (Medical Information Mart for Intensive Care III) is the data set used in this project，which is a large, freely-available database comprising health related data associated with patients who stayed within ICUs of the Beth Israel Deaconess Medical Center during the period 2001-2012.
+The data contains 53423 distinct hospital admissions, and during each admission a patient could have stayed in ICU more than once. The project start with 61532 total ICU stay encounters after removing a duplicated ICU stay encounter (unique ICU stay ID = 229922).
 
 # Data loading and preparation
 
@@ -60,6 +61,9 @@ labs_hourly <- readr::read_csv("../data/mimic_data/labs_hourly.csv")
 output_hourly <- readr::read_csv("../data/mimic_data/output_hourly.csv")
 icd9_diag <- readr::read_csv("../data/mimic_data/icd9_diag.csv")
 
+```
+```{r}
+dim(pt_icu_outcome)
 ```
 
 ```{r}
@@ -82,14 +86,49 @@ duplicated_patient_cleaned <- pt_icu_outcome %>%
   filter(icustay_id == 229922)
 print(duplicated_patient_cleaned)
 ```
+
+```{r}
+dim(pt_icu_outcome)
+summary(pt_icu_outcome)
+```
+
+
 # Question 1
+
+In this question, the analysis was based on unique adult patient's first ICU stay encounter among the patient's all ICU encounters, which resulted in a total of 38509 unique ICU stay. The admissions without clear hospital outcome are also remove, resulting in 32,245 unique ICU stay.
+
 
 ## Data preprocessing and EDA
 
 ### Main dataframe
 ```{r Link the main data tables}
-data_merge <- pt_icu_outcome |>
-  # Link the data tables
+# Retain the first ICU records of each patient's all ICU records
+
+data_filter <- pt_icu_outcome |>  
+  
+  group_by(subject_id) |>
+  slice_min(intime, n =1, with_ties = FALSE) |>
+  ungroup()
+dim(data_filter)
+
+# Filter records of patients age >= 18
+data_filter <- data_filter |>
+  filter(age_years >= 18)
+
+dim(data_filter)
+
+# Ensure exist of hospital outcome
+data_filter <- data_filter |>   
+
+  filter(!is.na(hospital_expire_flag))
+
+dim(data_filter)
+
+
+
+
+data_merge <- data_filter |>
+  # Link the data tables with demographic information data
   left_join(
     icustays |> select(icustay_id, first_careunit),
     by = "icustay_id"
@@ -107,18 +146,6 @@ data_merge <- pt_icu_outcome |>
     admissions |> select(hadm_id, admission_type, insurance, ethnicity),
     by = "hadm_id"
   ) |>
-
-  # Retain the first ICU records of each patient's all ICU records
-  group_by(subject_id) |>
-  slice_min(intime, n =1, with_ties = FALSE) |>
-  ungroup() |>
-
-  # Filter records of patients age >= 18
-  filter(age_years >= 18) |>
-    
-  # Ensure exist of hospital outcome
-  filter(!is.na(hospital_expire_flag)) |>
-  
   mutate(
     death = as.factor(hospital_expire_flag), 
     gender = as.factor(gender),               
@@ -128,11 +155,19 @@ data_merge <- pt_icu_outcome |>
   )
 
 ```
-Variables
+
+
+
+# Variables
+
+The outcome in this question was define as the in hospital outcome and the exposure ICU type was defined as the first care unit in one unique ICU stay encounter, including Cardiac Care Unit(CCU), Cardiac Surgery Unit(CSRC), Medical Intensive Care Unit(MICU), Neuro Intensive Care Unit(NICU), Surgical Intensive Care Unit(SICU) and Trauma Surgical Intensive Care Unit (TSICU). To estimate the total effect of ICU type on the in-hospital mortality outcome, the potential confounders will be controlled while the potential intermediate variables were avoided to be controlled (Greenland, 1999). Besides the important demographics (e.g. age, gender, ethnicity) and administrative (e.g. admission type, insurance), the variable selection of potential confoundings is based on SOFA/APACHE indicators. SOFA and APACHE are widely used in predicting  mortality of patients in different subspecialties, especially in ICU (Shahi, 2024; Moreno, 2023). SOFA consists of indicators cover six main systems of respiratory, coagulation, hepatic, cardiovascular, central nervous and renal system, while APACHE also emphasis vital signs and gastric chronic diseases (Vincent, 1996; Knaus, 1985).  According to the temporal sequence principle (Baker,2014), confounding factors must be measured before or simultaneously with exposure, only the vital signs and lab measurements collected within the first 24 hours after patients were enrolled to ICU were used. The extreme values that can best reflect the severity of the patient's condition were created as the representative value with in the 24h time window. Table 1 summarizes all the covariates that will be considered. The vital signs include heart rate, O2 saturation pulse oxymetry, respiratory rate, systolic blood pressure, mean arterial pressure, body temperature, Glasgow Coma Scales (GCS) and glucose. Laboratory measurements include creatinine, platelets and bilirubin.
+
+插入表格图片
+
 
 ### Form the confounder variabels
 混杂因素必须在暴露（ICU 类型的分配）之前或在分配时测量。
-select the variabels values measured within 24 hours before and after icu stay
+select the variabels values measured within 24 hours before and after ICU stay
 #### GCS 
 The minimum with 24 hr
 ```{r gcs}
@@ -147,9 +182,7 @@ gcs_24hr_min <- gcs_hourly |>
   ungroup()
 
 ```
-
 #### Bedside measurements
-
 ```{r}
 vital_24hr <- vitals_hourly |>
   filter(hr >= 0 & hr <= 24) |>
@@ -171,7 +204,6 @@ summary(vital_24hr)
 summary(vitals_hourly)
 
 ```
-
 #### lab measurements
 ```{r}
 lab_24hr <- labs_hourly |>
@@ -253,9 +285,7 @@ data_analysis <- data_merge |>
   )
 ```
 
-
-This is all variables used in Question 1 to modelling
-
+ 
 ### EDA and further preprocessing
 ```{r}
 # Sanity check
@@ -263,7 +293,7 @@ dim(data_analysis)
 str(data_analysis)
 summary(data_analysis)
 ```
-Outliers and missing data handling
+
 #### Check missing values
 ```{r Visualize the missing values}
 ####################################################
@@ -473,6 +503,12 @@ data_analy_clean |>
 ```
 根据这个选择使用MICU 作为模型拟合时的基线 class，因为MICU 的样本量最大，粗死亡率是最高的
 
+# Outliers and missing data handling
+Exploratory data analysis and data cleaning were performed after determine the cohort and extract the covariates. Errors can appear in data collection and entry, sanity check and distribution check suggested that extreme outliers that exceed the reasonable physiological range existed. For all continuous indicators, reasonable ranges were defined and any data points exceeding the ranges were regarded as data entry errors and marked as missing values (NA).
+Thorough missing data analysis were performed on the data and reported that extreme high missing rates over 85% in bedside measured vital signs including heart rate (max), SpO2 (min), respiratory rate (max), mean arterial pressure (min), body temperature (max & min), systolic blood pressure (min) and glucose (max). Bilirubin has a moderate missing rate over 50%, while platelets, GCS and creatinine had extremely low missing rate lower than 2%. The 2 observations with missing comorbidity information were deleted from the cohort, resulting in 32243 samples. Missing pattern check and visualization suggested that missing of vital signs presented high synchronization, with a missing correlation coefficient close to 1. The assumption that no measurement indicating rather stable condition was accepted. Normal value imputation was applied on bedside measurements and low missing rate variables. Missing of bilirubin has statistically significant association with the in-hospital outcome and ICU type, and Multiple Imputation by Chained Equations (MICE) (Azur, 2011) was applied to impute the variable. Given the joint missingness of vital signs, instead of creating separate missing markers for each variable, a new continuous variable was created to represent the number of missing indicators in vital signs covariates with high missing rates. A separate missing flag variable was created for bilirubin. 
+
+Vital signs的缺失基本是共同发生的，因此不对每个变量进行单独的缺失标志的创建，而是创建一个新的连续变量，用于表示患者在关键生理指标上的缺失数量。
+
 #### Check missing pattern
 
 ```{r}
@@ -507,12 +543,16 @@ for(v in vars_test){
 ```
 There is no obvious missing  pattern of vital signs, while the missing of `max_bilirubin_24h` is not random.
 
-The confounders are constructed based on SOFA/APACHE indicators. Although the high missing ratio, the variables are important potential confounders that reflecting the severity of the disease, clinical decision-making, and the intensity of monitoring.
+ Although the high missing ratio, the variables are important potential confounders that reflecting the severity of the disease, clinical decision-making, and the intensity of monitoring.
 
 The vital signs variables will be imputed with normal values and `max_bilirubin_24h` will be imputed with MICE.
 
+```{r}
+dim(data_analy_clean)
+```
+
 ### 保守填补并创建缺失标识
-由于缺失模式检查发现vital signs 的缺失基本是共同发生的，因此不对每个变量进行单独的缺失标志的创建，而是创建一个新的连续变量，用于表示患者在关键生理指标上的缺失数量。
+由于缺失模式检查发现vital signs 
 ```{r}
 vitals_missing_vars <- c("min_temp_24h", "max_temp_24h", "max_glucose_24h", "max_resp_24h", "min_sysbp_24h", "min_map_24h", "max_hr_24h", "min_spo2_24h")
 ```
@@ -541,6 +581,10 @@ data_imputed_normal <- data_analy_clean |>
      across(ends_with("flag"), as.factor)
    )
 
+```
+
+```{r}
+dim(data_imputed_normal)
 ```
 
 ```{r}
@@ -578,6 +622,12 @@ data_imputed_mice$max_bilirubin_24h_imp <- comp1$max_bilirubin_24h
 ```
 
 ```{r}
+dim(comp1)
+dim(data_imputed_mice)
+```
+
+
+```{r}
 p_map <- data_imputed_normal %>%
   ggplot(aes(x = min_map_24h)) +
   geom_histogram(bins = 50, fill = "#4DB6AC", color = "black") +
@@ -589,7 +639,29 @@ print(p_map)
 ```
 
 
-Modelling
+# Statistical analysis and model selection
+Multivariable logistic regression model were built to estimate ICU type total effect on binary in-hospital outcome. According to EDA results that MICU presented the largest sample size of 10,937 and the highest crude mortality rate, MICU is defined as the reference category in the logistic models.
+
+插入模型公式
+
+Given the use of MICE, the model with MICE imputed variables will be fitted on MICE completed data separately and the coefficients, standard errors and confidence intervals of the final model will be merged using Rubin's Rules.
+
+Progressive multivariate regression method was applied to fit 3 nested models(Table). The main model of this question is Model 2 which included all confounding factors.
+
+插入表格
+
+
+
+# Model diagnostics
+Use variance inflaction factor (VIF) to evaluate multicollinearity between independent variables. VIF > 5 would be regarded as severe collinearity, and the variables would be combined with other variables or excluded. 
+Cook's Distance (Cook, 1977) was calculated to examine if there were any single points that had excessive and systematic impact on the estimated coefficients, and 0.01 was defined as the threshold. 
+Hosmer-Lemeshow test (Hosmer, 1980) was used to evaluate the goodness-of-fit, and P-value>0.05 was acceptable, indicating that the model fitting of the data is sufficient and acceptable. Given the large cohort, 5000 observations were sampled to perform the test. 
+Although the model is not used to predict, the discriminative ability was also evaluated by ROC and AUC. The higher AUC value indicates the better ability to distinguish different outcomes.
+VIF, Hosmer-Lemeshow test and AUC were evaluated on all 5 imputed data set, Cook's Distance was calculated on one representative imputed data set.
+Another two models were fitted to perform sensitivity analysis to valid the robustness of the main model.
+
+插入Model3 和Model4
+
 ## Question 1 model fitting
 
 (1) Only `icu-type` included as self 
@@ -1071,6 +1143,8 @@ data_merge2 <- pt_icu_outcome |>
   
   # Filter records of patients age >= 18
   filter(age_years >= 18) |>
+  
+  filter(los >= 1) >|
     
   # Ensure exist of hospital outcome
   filter(!is.na(los)) |>
