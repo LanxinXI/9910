@@ -38,18 +38,16 @@ library(xgboost)
 library(rsample)
 library(caret)
 library(gtsummary)
+library(broom)
+library(kableExtra)
 ```
-# Question 1
 
-#  Methods
-2.1 Data source and cohort
 
-MIMIC-III v1.4 [9] (Medical Information Mart for Intensive Care III) is the data set used in this project，which is a large, freely-available database comprising health related data associated with patients who stayed within ICUs of the Beth Israel Deaconess Medical Center during the period 2001-2012.
-The data contains 53423 distinct hospital admissions, and during each admission a patient could have stayed in ICU more than once. The project start with 61532 total ICU stay encounters after removing a duplicated ICU stay encounter (unique ICU stay ID = 229922).
-
-# Data loading and preparation
 
 ```{r Data loading, echo=FALSE}
+###############################################################################
+###################### Data loading and preparation ###########################
+###############################################################################
 admissions <- readr::read_csv("../data/mimic_data/admissions.csv")
 patients <- readr::read_csv("../data/mimic_data/patients.csv")
 icustays <- readr::read_csv("../data/mimic_data/icustays.csv")
@@ -93,16 +91,19 @@ dim(pt_icu_outcome)
 summary(pt_icu_outcome)
 ```
 
-
 # Question 1
 
+## Q1.1 Methods
+### Q1.1.1 Data source and cohort
+
+MIMIC-III v1.4 [9] (Medical Information Mart for Intensive Care III) is the data set used in this project，which is a large, freely-available database comprising health related data associated with patients who stayed within ICUs of the Beth Israel Deaconess Medical Center during the period 2001-2012.
+The data contains 53423 distinct hospital admissions, and during each admission a patient could have stayed in ICU more than once. The project start with 61532 total ICU stay encounters after removing a duplicated ICU stay encounter (unique ICU stay ID = 229922).
 In this question, the analysis was based on unique adult patient's first ICU stay encounter among the patient's all ICU encounters, which resulted in a total of 38509 unique ICU stay. The admissions without clear hospital outcome are also remove, resulting in 32,245 unique ICU stay.
 
-
-## Data preprocessing and EDA
-
-### Main dataframe
 ```{r Link the main data tables}
+###############################################################################
+###################### Data preprocessing and EDA ###########################
+###############################################################################
 # Retain the first ICU records of each patient's all ICU records
 
 data_filter <- pt_icu_outcome |>  
@@ -158,20 +159,17 @@ data_merge <- data_filter |>
 ```
 
 
-
-# Variables
+### Q1.1.2 Variables
 
 The outcome in this question was define as the in hospital outcome and the exposure ICU type was defined as the first care unit in one unique ICU stay encounter, including Cardiac Care Unit(CCU), Cardiac Surgery Unit(CSRC), Medical Intensive Care Unit(MICU), Neuro Intensive Care Unit(NICU), Surgical Intensive Care Unit(SICU) and Trauma Surgical Intensive Care Unit (TSICU). To estimate the total effect of ICU type on the in-hospital mortality outcome, the potential confounders will be controlled while the potential intermediate variables were avoided to be controlled (Greenland, 1999). Besides the important demographics (e.g. age, gender, ethnicity) and administrative (e.g. admission type, insurance), the variable selection of potential confoundings is based on SOFA/APACHE indicators. SOFA and APACHE are widely used in predicting  mortality of patients in different subspecialties, especially in ICU (Shahi, 2024; Moreno, 2023). SOFA consists of indicators cover six main systems of respiratory, coagulation, hepatic, cardiovascular, central nervous and renal system, while APACHE also emphasis vital signs and gastric chronic diseases (Vincent, 1996; Knaus, 1985).  According to the temporal sequence principle (Baker,2014), confounding factors must be measured before or simultaneously with exposure, only the vital signs and lab measurements collected within the first 24 hours after patients were enrolled to ICU were used. The extreme values that can best reflect the severity of the patient's condition were created as the representative value with in the 24h time window. Table 1 summarizes all the covariates that will be considered. The vital signs include heart rate, O2 saturation pulse oxymetry, respiratory rate, systolic blood pressure, mean arterial pressure, body temperature, Glasgow Coma Scales (GCS) and glucose. Laboratory measurements include creatinine, platelets and bilirubin.
 
 插入表格图片
 
 
-### Form the confounder variabels
-混杂因素必须在暴露（ICU 类型的分配）之前或在分配时测量。
-select the variabels values measured within 24 hours before and after ICU stay
 #### GCS 
 The minimum with 24 hr
 ```{r gcs}
+
 summary(gcs_hourly)
 
 gcs_24hr_min <- gcs_hourly |>
@@ -264,7 +262,7 @@ head(comorbidity_groups)
 
 ```
 
-### Merge the confounder variabels to the main dataframe
+#### Merge the confounder variabels to the main dataframe
 ```{r Create the analysis dataframe for Question 1}
 # Select useful variables from the "data_merge"
 data_analysis <- data_merge |>
@@ -287,8 +285,11 @@ data_analysis <- data_merge |>
 ```
 
  
-### EDA and further preprocessing
+
 ```{r}
+###############################################################################
+###################### EDA and further preprocessing ###########################
+###############################################################################
 # Sanity check
 dim(data_analysis)
 str(data_analysis)
@@ -398,8 +399,8 @@ for (var in cat_vars) {
 
 
 #### 处理极端值
-
 ```{r}
+
 clean_limits <- list(
   age_years = c(16, 110),
   min_gcs_24h = c(3, 15),
@@ -504,7 +505,7 @@ data_analy_clean |>
 ```
 根据这个选择使用MICU 作为模型拟合时的基线 class，因为MICU 的样本量最大，粗死亡率是最高的
 
-# Outliers and missing data handling
+## Q1.1.3 Outliers and missing data handling
 Exploratory data analysis and data cleaning were performed after determine the cohort and extract the covariates. Errors can appear in data collection and entry, sanity check and distribution check suggested that extreme outliers that exceed the reasonable physiological range existed. For all continuous indicators, reasonable ranges were defined and any data points exceeding the ranges were regarded as data entry errors and marked as missing values (NA).
 Thorough missing data analysis were performed on the data and reported that extreme high missing rates over 85% in bedside measured vital signs including heart rate (max), SpO2 (min), respiratory rate (max), mean arterial pressure (min), body temperature (max & min), systolic blood pressure (min) and glucose (max). Bilirubin has a moderate missing rate over 50%, while platelets, GCS and creatinine had extremely low missing rate lower than 2%. The 2 observations with missing comorbidity information were deleted from the cohort, resulting in 32243 samples. Missing pattern check and visualization suggested that missing of vital signs presented high synchronization, with a missing correlation coefficient close to 1. The assumption that no measurement indicating rather stable condition was accepted. Normal value imputation was applied on bedside measurements and low missing rate variables. Missing of bilirubin has statistically significant association with the in-hospital outcome and ICU type, and Multiple Imputation by Chained Equations (MICE) (Azur, 2011) was applied to impute the variable. Given the joint missingness of vital signs, instead of creating separate missing markers for each variable, a new continuous variable was created to represent the number of missing indicators in vital signs covariates with high missing rates. A separate missing flag variable was created for bilirubin. 
 
@@ -639,7 +640,7 @@ p_map <- data_imputed_normal %>%
 
 print(p_map)  
 ```
-# Statistical analysis and model selection
+### Q1.1.4 Statistical analysis and model selection
 Multivariable logistic regression model were built to estimate ICU type total effect on binary in-hospital outcome. According to EDA results that MICU presented the largest sample size of 10,937 and the highest crude mortality rate, MICU is defined as the reference category in the logistic models.
 
 插入模型公式
@@ -652,27 +653,23 @@ Progressive multivariate regression method was applied to fit 3 nested models(Ta
 
 
 
-# Model diagnostics
+### Q1.1.5 Model diagnostics
 Use variance inflaction factor (VIF) to evaluate multicollinearity between independent variables. VIF > 5 would be regarded as severe collinearity, and the variables would be combined with other variables or excluded. 
 Cook's Distance (Cook, 1977) was calculated to examine if there were any single points that had excessive and systematic impact on the estimated coefficients, and 0.01 was defined as the threshold. 
 Hosmer-Lemeshow test (Hosmer, 1980) was used to evaluate the goodness-of-fit, and P-value>0.05 was acceptable, indicating that the model fitting of the data is sufficient and acceptable. Studies reported that the hypothesis of perfect fit is more likely to be rejected when testing with large sample size (Nattino, 2018; Liu, 2020). Given the large cohort in the study, 5000 observations were sampled to perform the test. 
 Although the model is not used to predict, the discriminative ability was also evaluated by ROC and AUC. The higher AUC value indicates the better ability to distinguish different outcomes.
 VIF, Hosmer-Lemeshow test and AUC were evaluated on all 5 imputed data set, Cook's Distance was calculated on one representative imputed data set.
-Another two models were fitted to perform sensitivity analysis to valid the robustness of the main model.
+Another two models were fitted to perform sensitivity analysis to test the robustness of the main model. Model 3 excluded covariates with missing rate higher than 50% and was fitted with the complete cases. Model 4 included all covariates and was fitted with complete samples.
 
 插入Model3 和 Model4
 
-# Results
-## Descriptive statistics of cohort
+## Q1.2 Results
+### Q1.2.1 Descriptive statistics of cohort
+Totally 32,243 ICU stay encounters are included in the analysis, among which MICU had most ICU stays (n = 10.937, 34.0%). The overall age mean of the patients was 63.2 (17.5), and CCU patients had the highest age mean of 67.9. Most of the patients (80.0%) were admitted to the hospital through emergency. There were significant differences in the burden of comorbidities among patients of various ICU types. Most  patients payed though  Medicare (52.3%) or private (35.1%) insurance. Cardiovascular comorbidity is the most common in CCU (74.3%), while the proportion pulmonary comorbidity reached 67.1%. White people are the majority population. As for the in-hospital outcomes, the overall in-hospital mortality was 4.5% and there were statistically significant differences (P < 0.001) between the mortality rates of various ICU types. MICU had the highest mortality rate of 6.8%, while CSICU had the lowest mortality rate of 1.4%.
 
-## Model estimates
-
-## Model diagnostics
-
-### Demographics baseline
-Use`data_imputed_normal`, n = 32243
 
 ```{r}
+# Use`data_imputed_normal`, n = 32243
 str(data_imputed_normal)
 ```
 ```{r}
@@ -690,6 +687,10 @@ data_imputed_normal |>
     statistic = list(
       all_continuous() ~ "{mean} ({sd})",
       all_categorical() ~ "{n} ({p}%)"
+    ),
+    digits = list(
+      all_continuous() ~ 1, 
+      all_categorical() ~ 1
     ),
     missing = "ifany",
     label = list(
@@ -715,7 +716,7 @@ data_imputed_normal |>
 ```
 
 
-## Question 1 model fitting
+
 
 (1) Model0: Modelling with only `icu_type` included as independent variable on the imputed data
 (2) Model1: Model0 + Demographics
@@ -726,7 +727,7 @@ data_imputed_normal |>
 data_imputed_mice$icu_type <- relevel(data_imputed_mice$icu_type, ref = "MICU")
 ```
 
-### Model 0 modelling with only ICU type on imputed data
+#### Model 0 modelling with only ICU type on imputed data
 ```{r}
 mod0 <- glm(death ~ icu_type, data = data_imputed_mice, family = binomial)
 
@@ -737,7 +738,7 @@ summary(mod0)
 exp(cbind(OR = coef(mod0), confint(mod0)))
 ```
 
-### Model 1: mod0 + demographics on imputed data
+#### Model 1: mod0 + demographics on imputed data
 ```{r}
 mod1 <- glm(death ~ icu_type + age_years + gender + ethnicity + admission_type + insurance, data = data_imputed_mice, family = binomial)
 
@@ -749,7 +750,7 @@ summary(mod1)
 exp(cbind(OR = coef(mod1), confint(mod1)))
 ```
 
-### Model 2 mod1 + comorbidity + severity of disease on imputed data
+#### Model 2 mod1 + comorbidity + severity of disease on imputed data
 ```{r}
   
 demographic_comorbidity <- "age_years + gender + ethnicity + admission_type + insurance + comorb_cardio + comorb_renal + comorb_pulm + comorb_diabetes + comorb_cancer + comorb_other + comorb_liver"
@@ -790,64 +791,115 @@ or_tab
 ```
 
 
-#### Sensitivity analysis model
-#### Model 3： Modelling with data removed variabels with missing values over 50% and keep the complete samples
-```{r}
-data_low_missing <- data_analy_clean |> 
-  select(-min_temp_24h, -max_temp_24h, -max_glucose_24h, -max_resp_24h, -min_sysbp_24h, -min_map_24h, -max_hr_24h, -min_spo2_24h, -max_bilirubin_24h) |>
-  drop_na()
-
-data_low_missing$icu_type <- relevel(data_low_missing$icu_type, ref = "MICU")
-
-demographic_comorbidity <- "age_years + gender + ethnicity + admission_type + insurance + comorb_cardio + comorb_renal + comorb_pulm + comorb_diabetes + comorb_cancer + comorb_other+comorb_liver"
-
-other_confounders <- "min_gcs_24h + min_platelets_24h + max_creatinine_24h"
-
-formula3 <- paste("death ~ icu_type +", demographic_comorbidity, "+", other_confounders)
-
-mod3 <- glm(as.formula(formula3), data = data_low_missing, family = binomial())
-
-summary(mod3)
-
-```
-```{r}
-exp(cbind(OR = coef(mod3), confint(mod3)))
-```
-
-#### Model 4: Modelling with samples with complete values (Keep all confounding variables)
-```{r}
-data_complete <- na.omit(data_analy_clean)
-
-data_complete$icu_type <- relevel(data_complete$icu_type, ref = "MICU")
-
-formula4 <- death ~ icu_type + age_years + gender + ethnicity + admission_type + insurance + comorb_cardio + comorb_renal + comorb_pulm + comorb_diabetes + comorb_cancer + comorb_other+comorb_liver + min_gcs_24h + min_platelets_24h + max_creatinine_24h + min_map_24h + max_hr_24h + min_spo2_24h + max_resp_24h + min_sysbp_24h + min_temp_24h + max_temp_24h + max_glucose_24h + max_bilirubin_24h   
-
-mod4 <- glm(as.formula(formula4), data = data_complete, family = binomial())
-
-summary(mod4)
-```
-
-```{r}
-exp(cbind(OR = coef(mod4), confint(mod4)))
-```
-CCU is the baseline class.
-CSRU: 死亡风险大约只有0.3倍，所有模型中OR方向一致(OR<1)。mod2相比mod1几乎没有变化，表明CSRU 的低风险不是由协变量驱动的。mod4中不显著是统计功效损失的典型表现。
-SICU: 除了mod1外SICU与死亡率的关联都不显著
-TSICU
-
-
-### Model diagnostics on main model
 
 
 ```{r}
-vif_mod1 <- vif(mod1)
-vif_mod3 <- vif(mod3)
-vif_mod4 <- vif(mod4)
-vif_mod1
-vif_mod3
-vif_mod4
+# Model 0
+mod0_coef <- coef(summary(mod0))
+mod0_tab <- data.frame(
+  term = rownames(mod0_coef),
+  estimate = mod0_coef[, "Estimate"],
+  std.error = mod0_coef[, "Std. Error"],
+  p.value = mod0_coef[, "Pr(>|z|)"]
+) |>
+  filter(grepl("^icu_type", term)) |>
+  mutate(
+    OR = exp(estimate),
+    conf.low = exp(estimate - 1.96 * std.error),
+    conf.high = exp(estimate + 1.96 * std.error),
+    model = "Model 0" 
+) |>
+  select(model, term, OR, conf.low, conf.high, p.value )
+
+# Model 1
+mod1_coef <- coef(summary(mod1))
+mod1_tab <- data.frame(
+  term = rownames(mod1_coef),
+  estimate = mod1_coef[, "Estimate"],
+  std.error = mod1_coef[, "Std. Error"],
+  p.value = mod1_coef[, "Pr(>|z|)"]
+) |>
+  filter(grepl("^icu_type", term)) |>
+  mutate(
+    OR = exp(estimate),
+    conf.low = exp(estimate - 1.96 * std.error),
+    conf.high = exp(estimate + 1.96 * std.error),
+    model = "Model 1" 
+) |>
+  select(model, term, OR, conf.low, conf.high, p.value )
+
+# Model 2
+s <- summary(pool2)
+tval <- qt(0.975, df = s$df)
+lower <- s$estimate - tval * s$std.error
+upper <- s$estimate + tval * s$std.error
+mod2_tab <- data.frame(
+  term = s$term,
+  OR = exp(s$estimate),
+  conf.low = exp(lower),
+  conf.high = exp(upper),
+  p.value = s$p.value
+) |>
+  filter(grepl("^icu_type", term)) |>
+  mutate(model = "Model 2")
+
+
 ```
 
+
+```{r}
+# Output table
+estimate_summary <- bind_rows(mod0_tab, mod1_tab, mod2_tab) |>
+  mutate(
+    term = as.character(term),
+    term = case_when(
+      term == "icu_typeCCU"   ~ "CCU vs MICU",
+      term == "icu_typeCSRU"  ~ "CSRU vs MICU",
+      term == "icu_typeSICU"  ~ "SICU vs MICU",
+      term == "icu_typeTSICU" ~ "TSICU vs MICU",
+      TRUE ~ term
+    ),
+    OR = round(OR, 2),
+    conf.low = round(conf.low, 2),
+    conf.high = round(conf.high, 2),
+    CI95 = paste0("(", conf.low, ", ", conf.high, ")"),
+    p.value = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))
+  ) |>
+  select(ICU_Type = term, Model = model, OR, CI95, p.value) 
+
+rownames(estimate_summary) <- NULL 
+
+estimate_summary |>
+  arrange(ICU_Type, Model) |>
+  kbl(
+    caption = "Odds Ratios and p-values for ICU types across models",
+    align = "lccccc",
+    digits = 3
+  ) |>
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE,
+    position = "center",
+    font_size = 13
+  ) |>
+  column_spec(1, bold = TRUE, width = "4cm") %>%
+  column_spec(2, italic = TRUE, width = "4cm") %>%
+  column_spec(3:4, width = "2.5cm")
+
+```
+### Q1.2.3 Model estimates
+The three logistic regression models were fitted to estimate the association between ICU type and in-hospital outcome.
+The estimates of the unadjusted model (Model 0) reported that CCU (OR = 0.62, CI[0.53, 0.73]), CSRU (OR = 0.19, CI[0.15, 0.24]), SICU (OR = 0.66, CI[0.57, 0.76]), and TSICU (OR = 0.49, CI[0.41, 0.58]), indicating significantly lower risk of in-hospital death (all p < 0.001) compared with MICU.
+The partial-adjusted model (Model 1) adjusted for demographic factors. Slight changes appeared in OR and reported that CCU had OR = 0.50 (CI[0.43, 0.59]), CSRU had OR = 0.22 (CI[0.18, 0.28]), SICU  had OR = 0.75 (CI[0.64, 0.87]), and TSICU had OR = 0.60 (CI[0.50, 0.72]).
+The fully adjusted model (Model 2) adjusted for comorbidity and severity of disease. OR in all ICU types were still less than 1 and the associations between ICU type and in-hospital outcome were still statistically significant. CSRU still reported the lowest OR of 0.20 (CI[0.15, 0.25]) and the OR value of TSICU changed most significantly, rising sharply from 0.49 in Model 0 to 0.77 (CI[0.64, 0.94]). CCU (OR = 0.66, CI[0.56, 0.79]) and SICU (OR = 0.74, CI[0.63, 0.87]) also reported with higher OR than in Model 0.
+
+### Q1.2.4 Model diagnostics
+Model diagnositics were performed on the fully adjusted model. Multicollinearity test repoted that All adjusted GVIF values of covariates were lower than 2.5, indicating no serious multicollinearity concern. The goodness-of-fit was tested through Hosmer-Lemeshow test. The tests across all 5 imputed datasets reported p-values from 0.1804 to 0.4004, with the mean p-value of 0.2628. The results suggested no evidence of lack of fit. AUC were calculated on all 5 imputed datasets and reported mean AUC of 0.818. 
+Approximately 230 influential data points were identified in Cook's Distance test with threshold of 0.001, and the maximum value of Cook's distance is around 0.004. The model were refitted after removing the influential data points and the refitted model demonstrated slight differences Model 2 in OR and 95% CI.
+### Q1.2.5 Sensitivity analysis
+Another two models were fitted to test the reliability of the fully adjusted model.As shown in the table, the estimates of Model 3 were highly consistent with the fully adjusted model(Model 2). The OR of CCU was 0.63, that of CSRU was 0.17, that of SICU was 0.71, and that of TSICU was 0.70. All the results were statistically significant. The estimates of Model 4 presented significant differences from Model 2. The OR of CCU was 0.56, that of CSRU was 0.30, that of SICU was 0.51, and that of TSICU was 0.90. The ORs of CCU and TSICU had no statistical significance (p > 0.05). The 95% confidence intervals became wide.
+
+#### Model diagnostics on main model
 
 ```{r}
 # VIF of main model "mod2"
@@ -858,7 +910,7 @@ mod_vif <- glm(as.formula(formula), data = comp1, family = binomial)
 vif_mod2 <- vif(mod_vif)
 print(vif_mod2)
 ```
-所有模型均不存在共线性问题。
+
 
 Hosmer-Lemeshow on main model "mod2"
 ```{r}
@@ -920,7 +972,7 @@ cat("---- Suumary ----\n")
 if (length(valid_pvalues) > 0) {
   cat(sprintf("Min p = %.4f, Max p = %.4f, Mean p = %.4f\n",
               min(valid_pvalues), max(valid_pvalues), mean(valid_pvalues)))
-  cat(sprintf("Proportion of  p < 0.05 例: %.2f\n", mean(valid_pvalues < 0.05)))
+  cat(sprintf("Proportion of  p < 0.05 : %.2f\n", mean(valid_pvalues < 0.05)))
 } else {
   cat("All test failed.\n")
 }
@@ -984,11 +1036,13 @@ for (i in 1:M) {
 ```
 
 ```{r}
+fit1 <- glm(as.formula(formula), data = comp1, family = binomial)
 cookd <- cooks.distance(fit1)
 
 cutoff <- 0.001
 
-plot(cookd, type = "h",
+plot(1:length(cookd),
+     cookd, type = "h",
      main = "Cook's Diatance (Imputed Dataset 1)",
      xlab = "Observation Index",
      ylab = "Cook's distance")
@@ -998,7 +1052,7 @@ points(which(cookd > cutoff), cookd[cookd > cutoff],
        col ="#E57373", pch = 19)
 
 ```
-在样本量达到32,000 级别的大数据集中，Cook's distance的最大值大约在0.004.，且大部分都远小于0.1，在大样本量的数据中，这些单个的观测点对模型系数的影响几乎微乎其微。
+
 
 ```{r}
 idx_high <- which(cookd > cutoff)
@@ -1010,24 +1064,255 @@ fit_drop <- glm(as.formula(formula), data = dat1[-idx_high, ], family = binomial
 
 library(broom)
 or_full <- tidy(fit_full, exponentiate = TRUE, conf.int = TRUE)  |> 
-  dplyr::filter(grepl("^icu_type", term)) |> 
-  dplyr::mutate(model = "full")
+  filter(grepl("^icu_type", term)) |> 
+  mutate(model = "full")
 
 or_drop <- tidy(fit_drop, exponentiate = TRUE, conf.int = TRUE)  |> 
-  dplyr::filter(grepl("^icu_type", term)) |> 
-  dplyr::mutate(model = "drop_high_cooks")
+  filter(grepl("^icu_type", term)) |> 
+  mutate(model = "drop_high_cooks")
 
-rbind(or_full, or_drop)
+
 ```
-将 Cook’s distance > 0.001 的约 200 余个潜在高影响样本剔除后再次拟合模型，各 ICU 类型的 OR 与原模型基本一致：CSRU 仍显著低于 CCU，MICU 仍显著高于 CCU，而 SICU 和 TSICU 仍未达到统计学显著水平，提示主要结果并非由少数异常样本驱动，模型具有良好的稳健性。
 
-# Discussion
+```{r}
+
+compare_or <- rbind(or_full, or_drop) |>
+  mutate(
+    term = case_when(
+      term == "icu_typeCCU"   ~ "CCU vs MICU",
+      term == "icu_typeCSRU"  ~ "CSRU vs MICU",
+      term == "icu_typeSICU"  ~ "SICU vs MICU",
+      term == "icu_typeTSICU" ~ "TSICU vs MICU",
+      TRUE ~ term),
+    model = ifelse(model == "full", "Full model", "High Cook’s D removed"),
+    OR = round(estimate, 2),
+    CI95 = paste0("(", round(conf.low, 2), ", ", round(conf.high, 2), ")"),
+    p.value = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))
+  ) |>
+  select(ICU_Type = term, Model = model,  OR, CI95, p.value)
+
+rownames(compare_or) <- NULL
+compare_or |>
+  arrange(ICU_Type, Model)|>
+  kbl(
+    caption = "Sensitivity Analysis: ICU Type Effects before and after removing high Cook’s D cases",
+    align = "lcccc",
+    digits = 3
+  ) |>
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE,
+    position = "center",
+    font_size = 13
+  ) |>
+  column_spec(1, bold = TRUE, width = "4cm") |>
+  column_spec(2, italic = TRUE, width = "4cm") |>
+  column_spec(3:4, width = "2.5cm")
+  
+
+```
+
+#### Sensitivity analysis model
+#### Model 3： Modelling with data removed variabels with missing values over 50% and keep the complete samples
+```{r}
+data_low_missing <- data_analy_clean |> 
+  select(-min_temp_24h, -max_temp_24h, -max_glucose_24h, -max_resp_24h, -min_sysbp_24h, -min_map_24h, -max_hr_24h, -min_spo2_24h, -max_bilirubin_24h) |>
+  drop_na()
+
+data_low_missing$icu_type <- relevel(data_low_missing$icu_type, ref = "MICU")
+
+demographic_comorbidity <- "age_years + gender + ethnicity + admission_type + insurance + comorb_cardio + comorb_renal + comorb_pulm + comorb_diabetes + comorb_cancer + comorb_other+comorb_liver"
+
+other_confounders <- "min_gcs_24h + min_platelets_24h + max_creatinine_24h"
+
+formula3 <- paste("death ~ icu_type +", demographic_comorbidity, "+", other_confounders)
+
+mod3 <- glm(as.formula(formula3), data = data_low_missing, family = binomial())
+
+summary(mod3)
+
+```
+```{r}
+exp(cbind(OR = coef(mod3), confint(mod3)))
+```
+
+#### Model 4: Modelling with samples with complete values (Keep all confounding variables)
+```{r}
+data_complete <- na.omit(data_analy_clean)
+
+data_complete$icu_type <- relevel(data_complete$icu_type, ref = "MICU")
+
+formula4 <- death ~ icu_type + age_years + gender + ethnicity + admission_type + insurance + comorb_cardio + comorb_renal + comorb_pulm + comorb_diabetes + comorb_cancer + comorb_other+comorb_liver + min_gcs_24h + min_platelets_24h + max_creatinine_24h + min_map_24h + max_hr_24h + min_spo2_24h + max_resp_24h + min_sysbp_24h + min_temp_24h + max_temp_24h + max_glucose_24h + max_bilirubin_24h   
+
+mod4 <- glm(as.formula(formula4), data = data_complete, family = binomial())
+
+summary(mod4)
+```
+
+```{r}
+exp(cbind(OR = coef(mod4), confint(mod4)))
+```
+```{r}
+# Model 3
+mod3_coef <- coef(summary(mod3))
+mod3_tab <- data.frame(
+  term = rownames(mod3_coef),
+  estimate = mod3_coef[, "Estimate"],
+  std.error = mod3_coef[, "Std. Error"],
+  p.value = mod3_coef[, "Pr(>|z|)"]
+) |>
+  filter(grepl("^icu_type", term)) |>
+  mutate(
+    OR = exp(estimate),
+    conf.low = exp(estimate - 1.96 * std.error),
+    conf.high = exp(estimate + 1.96 * std.error),
+    model = "Model 3" 
+) |>
+  select(model, term, OR, conf.low, conf.high, p.value )
+
+# Model 4
+mod4_coef <- coef(summary(mod4))
+mod4_tab <- data.frame(
+  term = rownames(mod4_coef),
+  estimate = mod4_coef[, "Estimate"],
+  std.error = mod4_coef[, "Std. Error"],
+  p.value = mod4_coef[, "Pr(>|z|)"]
+) |>
+  filter(grepl("^icu_type", term)) |>
+  mutate(
+    OR = exp(estimate),
+    conf.low = exp(estimate - 1.96 * std.error),
+    conf.high = exp(estimate + 1.96 * std.error),
+    model = "Model 4" 
+) |>
+  select(model, term, OR, conf.low, conf.high, p.value )
 
 
+```
+
+```{r}
+# Output table
+sensitivity_summary <- bind_rows(mod3_tab, mod4_tab) |>
+  mutate(
+    term = as.character(term),
+    term = case_when(
+      term == "icu_typeCCU"   ~ "CCU vs MICU",
+      term == "icu_typeCSRU"  ~ "CSRU vs MICU",
+      term == "icu_typeSICU"  ~ "SICU vs MICU",
+      term == "icu_typeTSICU" ~ "TSICU vs MICU",
+      TRUE ~ term
+    ),
+    OR = round(OR, 2),
+    conf.low = round(conf.low, 2),
+    conf.high = round(conf.high, 2),
+    CI95 = paste0("(", conf.low, ", ", conf.high, ")"),
+    p.value = ifelse(p.value < 0.001, "<0.001", round(p.value, 3))
+  ) |>
+  select(ICU_Type = term, Model = model, OR, CI95, p.value) 
+
+rownames(sensitivity_summary) <- NULL 
+
+sensitivity_summary |>
+  arrange(ICU_Type, Model) |>
+  kbl(
+    caption = "Odds Ratios and p-values for ICU types across sensitivity analysis models",
+    align = "lccccc",
+    digits = 3
+  ) |>
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE,
+    position = "center",
+    font_size = 13
+  ) |>
+  column_spec(1, bold = TRUE, width = "4cm") |>
+  column_spec(2, italic = TRUE, width = "4cm") |>
+  column_spec(3:4, width = "2.5cm")
+```
+
+## Q1.3 Discussion
+
+
+ indicating that the estimates of the model were not driven by the influential data points and the model estimates were robust and reliable.
 
 
 
 # Question 2
+## Q2.1 Methods
+### Q2.1.2 Data source and cohort
+The same data MIMIC-III v1.4 was used in Question 2.
+
+MIMIC-III v1.4 contains 53423 distinct hospital admissions, and during each admission a patient could have stayed in ICU more than once. The project started with 61532 total ICU stay encounters after removing a duplicated ICU stay encounter (unique ICU stay ID = 229922).
+
+In this question, the analysis was based on unique ICU stay encounters rather than unique patient identifiers, which resulted in a total of 38509 unique ICU stay. The admissions without clear hospital outcome are also remove, resulting in 32,245 unique ICU stay.
+
+```{r}
+data_filter2 <- pt_icu_outcome |>  
+  
+# Filter records of patients age >= 18
+  filter(age_years >= 18) 
+dim(data_filter2)  
+
+# Filter ICU stays with los less than 24h
+data_filter <- data_filter |>  
+  filter(los >= 1) 
+dim(data_filter2)
+
+# Ensure los in ICU exist
+data_filter2 <- data_filter2 |>   
+
+  filter(!is.na(los))
+
+dim(data_filter2)
+
+# Link the data tables
+data_merge2 <- data_filter2 |>
+  
+  left_join(
+    icustays |> select(icustay_id, first_careunit),
+    by = "icustay_id"
+  ) |>
+  mutate(
+    icu_type = as.factor(first_careunit)
+  ) |>
+  
+  left_join(
+    patients |> select(subject_id, gender),
+    by = "subject_id"
+  ) |>
+  
+  left_join(
+    admissions |> select(hadm_id, admission_type, insurance, ethnicity),
+    by = "hadm_id"
+  ) |>
+  
+  left_join(
+    comorbidity_groups, by = "hadm_id"
+  ) |>
+  
+  mutate(
+    # Binary indicator of length of stay
+    prolonged_los = factor(ifelse(los >= 7, 1,0),
+                           levels = c(0,1),
+                           labels = c("short stay", "prolonged stay")),
+    gender = as.factor(gender),               
+    insurance = as.factor(insurance),         
+    ethnicity = as.factor(ethnicity),         
+    admission_type = as.factor(admission_type),
+    first_careunit = as.factor(first_careunit),
+    
+    # Recode the ethnicity
+    ethnicity = case_when(
+      str_detect(ethnicity, "WHITE") ~ "WHITE",
+      str_detect(ethnicity, "BLACK|AFRICAN AMERICAN") ~ "BLACK",
+      str_detect(ethnicity, "HISPANIC|LATINO") ~ "HISPANIC",
+      TRUE ~ "OTHER/UNKNOWN"
+    ),
+    ethnicity = as.factor(ethnicity)
+  ) |>
+```
+
+
 ```{r}
 hr_lower <- 20
 hr_upper <- 250
@@ -1170,59 +1455,7 @@ quantile_features_imputed <- quantile_features |>
 为避免数据泄露，sd的插补只用训练集上的中位数进行插补
 
 ```{r}
-data_merge2 <- pt_icu_outcome |>
-  # Link the data tables
-  left_join(
-    icustays |> select(icustay_id, first_careunit),
-    by = "icustay_id"
-  ) |>
-  mutate(
-    icu_type = as.factor(first_careunit)
-  ) |>
-  
-  left_join(
-    patients |> select(subject_id, gender),
-    by = "subject_id"
-  ) |>
-  
-  left_join(
-    admissions |> select(hadm_id, admission_type, insurance, ethnicity),
-    by = "hadm_id"
-  ) |>
-  
-  left_join(
-    comorbidity_groups, by = "hadm_id"
-  ) |>
-  
-  
-  # Filter records of patients age >= 18
-  filter(age_years >= 18) |>
-  
-  filter(los >= 1) >|
-    
-  # Ensure exist of hospital outcome
-  filter(!is.na(los)) |>
 
-  mutate(
-    # Binary indicator of length of stay
-    prolonged_los = factor(ifelse(los >= 7, 1,0),
-                           levels = c(0,1),
-                           labels = c("short stay", "prolonged stay")),
-    gender = as.factor(gender),               
-    insurance = as.factor(insurance),         
-    ethnicity = as.factor(ethnicity),         
-    admission_type = as.factor(admission_type),
-    first_careunit = as.factor(first_careunit),
-    
-    # Recode the ethnicity
-    ethnicity = case_when(
-      str_detect(ethnicity, "WHITE") ~ "WHITE",
-      str_detect(ethnicity, "BLACK|AFRICAN AMERICAN") ~ "BLACK",
-      str_detect(ethnicity, "HISPANIC|LATINO") ~ "HISPANIC",
-      TRUE ~ "OTHER/UNKNOWN"
-    ),
-    ethnicity = as.factor(ethnicity)
-  ) |>
   
   inner_join(
     quantile_features_imputed,
