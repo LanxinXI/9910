@@ -37,6 +37,7 @@ library(fastDummies)
 library(xgboost)
 library(rsample)
 library(caret)
+library(gtsummary)
 ```
 # Question 1
 
@@ -548,6 +549,8 @@ There is no obvious missing  pattern of vital signs, while the missing of `max_b
 The vital signs variables will be imputed with normal values and `max_bilirubin_24h` will be imputed with MICE.
 
 ```{r}
+data_analy_clean <- data_analy_clean |>
+  filter(!if_any(starts_with("Comorb_"), is.na))
 dim(data_analy_clean)
 ```
 
@@ -559,7 +562,6 @@ vitals_missing_vars <- c("min_temp_24h", "max_temp_24h", "max_glucose_24h", "max
 
 ```{r}
 data_imputed_normal <- data_analy_clean |>
-  filter(!if_any(starts_with("Comorb_"), is.na)) |>
   mutate(
     vitals_missing_count = rowSums(across(all_of(vitals_missing_vars), ~ is.na(.x))),
     max_bilirubin_24h_missing_flag = as.integer(is.na(max_bilirubin_24h))
@@ -637,8 +639,6 @@ p_map <- data_imputed_normal %>%
 
 print(p_map)  
 ```
-
-
 # Statistical analysis and model selection
 Multivariable logistic regression model were built to estimate ICU type total effect on binary in-hospital outcome. According to EDA results that MICU presented the largest sample size of 10,937 and the highest crude mortality rate, MICU is defined as the reference category in the logistic models.
 
@@ -655,17 +655,71 @@ Progressive multivariate regression method was applied to fit 3 nested models(Ta
 # Model diagnostics
 Use variance inflaction factor (VIF) to evaluate multicollinearity between independent variables. VIF > 5 would be regarded as severe collinearity, and the variables would be combined with other variables or excluded. 
 Cook's Distance (Cook, 1977) was calculated to examine if there were any single points that had excessive and systematic impact on the estimated coefficients, and 0.01 was defined as the threshold. 
-Hosmer-Lemeshow test (Hosmer, 1980) was used to evaluate the goodness-of-fit, and P-value>0.05 was acceptable, indicating that the model fitting of the data is sufficient and acceptable. Given the large cohort, 5000 observations were sampled to perform the test. 
+Hosmer-Lemeshow test (Hosmer, 1980) was used to evaluate the goodness-of-fit, and P-value>0.05 was acceptable, indicating that the model fitting of the data is sufficient and acceptable. Studies reported that the hypothesis of perfect fit is more likely to be rejected when testing with large sample size (Nattino, 2018; Liu, 2020). Given the large cohort in the study, 5000 observations were sampled to perform the test. 
 Although the model is not used to predict, the discriminative ability was also evaluated by ROC and AUC. The higher AUC value indicates the better ability to distinguish different outcomes.
 VIF, Hosmer-Lemeshow test and AUC were evaluated on all 5 imputed data set, Cook's Distance was calculated on one representative imputed data set.
 Another two models were fitted to perform sensitivity analysis to valid the robustness of the main model.
 
-插入Model3 和Model4
+插入Model3 和 Model4
+
+# Results
+## Descriptive statistics of cohort
+
+## Model estimates
+
+## Model diagnostics
+
+### Demographics baseline
+Use`data_imputed_normal`, n = 32243
+
+```{r}
+str(data_imputed_normal)
+```
+```{r}
+
+demo_vars <- c("age_years", "gender", "icu_type", "admission_type", "insurance", "ethnicity", "comorb_cardio", "comorb_renal", "comorb_pulm", "comorb_diabetes", "comorb_cancer", "comorb_liver", "comorb_other", "death")
+
+data_imputed_normal |>
+  select(all_of(demo_vars)) |>
+  mutate(
+    across(starts_with("comorb_"), ~factor(.x, levels = c("0","1"), labels = c("No","Yes"))),
+    death = factor(death, levels = c(0, 1,"0", "1"), labels = c("Alive","Died","Alive","Died"))
+  ) |>
+  tbl_summary(
+    by = "icu_type",
+    statistic = list(
+      all_continuous() ~ "{mean} ({sd})",
+      all_categorical() ~ "{n} ({p}%)"
+    ),
+    missing = "ifany",
+    label = list(
+      age_years ~ "Age (years)",
+      gender ~ "Gender",
+      admission_type ~ "Admission Type", 
+      insurance ~ "Insurance",
+      ethnicity ~ "Ethnicity",
+      comorb_cardio ~ "Cardiovascular Comorbidity", 
+      comorb_renal ~ "Renal Comorbidity",
+      comorb_pulm ~ "Pulmonary Comorbidity", 
+      comorb_diabetes ~ "Diabetes", 
+      comorb_cancer ~ "Cancer", 
+      comorb_liver ~ "Liver Disease", 
+      comorb_other ~ "Other Comorbidity",
+      death ~ "In-hospital Outcome"
+    )
+  ) |>
+  add_overall(last = TRUE) |>
+  add_p() |>
+  modify_header(label = "**Variable**") |>
+  bold_labels()
+```
+
 
 ## Question 1 model fitting
 
-(1) Only `icu-type` included as self 
-(2)primary model with clinically-informed normal-value imputation and missingness indicators,
+(1) Model0: Modelling with only `icu_type` included as independent variable on the imputed data
+(2) Model1: Model0 + Demographics
+(3) Model2: Model1 + Comorbidity + severity of disease( Vital signs & Lab measurements) + Missing flags
 (3) sensitivity model removing variables with >50% missingness and performing complete-case analysis,
 (4) complete-case full-variable model including all predictors without imputation.
 ```{r}
@@ -747,7 +801,7 @@ data_low_missing$icu_type <- relevel(data_low_missing$icu_type, ref = "MICU")
 
 demographic_comorbidity <- "age_years + gender + ethnicity + admission_type + insurance + comorb_cardio + comorb_renal + comorb_pulm + comorb_diabetes + comorb_cancer + comorb_other+comorb_liver"
 
-other_confounders <- "min_gcs_24h + min_platelets_24h + max_creatinine_24h + is_ventilated_24h"
+other_confounders <- "min_gcs_24h + min_platelets_24h + max_creatinine_24h"
 
 formula3 <- paste("death ~ icu_type +", demographic_comorbidity, "+", other_confounders)
 
@@ -766,7 +820,7 @@ data_complete <- na.omit(data_analy_clean)
 
 data_complete$icu_type <- relevel(data_complete$icu_type, ref = "MICU")
 
-formula4 <- death ~ icu_type + age_years + gender + ethnicity + admission_type + insurance + comorb_cardio + comorb_renal + comorb_pulm + comorb_diabetes + comorb_cancer + comorb_other+comorb_liver + min_gcs_24h + min_platelets_24h + max_creatinine_24h + min_map_24h + max_hr_24h + min_spo2_24h + max_resp_24h + min_sysbp_24h + min_temp_24h + max_temp_24h + max_glucose_24h + max_bilirubin_24h + is_ventilated_24h  
+formula4 <- death ~ icu_type + age_years + gender + ethnicity + admission_type + insurance + comorb_cardio + comorb_renal + comorb_pulm + comorb_diabetes + comorb_cancer + comorb_other+comorb_liver + min_gcs_24h + min_platelets_24h + max_creatinine_24h + min_map_24h + max_hr_24h + min_spo2_24h + max_resp_24h + min_sysbp_24h + min_temp_24h + max_temp_24h + max_glucose_24h + max_bilirubin_24h   
 
 mod4 <- glm(as.formula(formula4), data = data_complete, family = binomial())
 
