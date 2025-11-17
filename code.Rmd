@@ -156,7 +156,40 @@ gcs_24hr_min <- gcs_hourly |>
 ```
 #### Bedside measurements
 ```{r}
-vital_24hr <- vitals_hourly |>
+summary(vitals_hourly)
+```
+```{r}
+# Adress the outliers
+clean_limits_vitals <- list(
+  
+  meanarterialpressure = c(20, 140),
+  sysbp = c(40, 260),
+  heartrate = c(20, 250),
+  resprate = c(5, 80),
+  spo2 = c(50, 100),
+  temperature = c(30, 43),
+  glucose = c(40, 600)
+ 
+)
+
+
+vitals_hourly_clean <- vitals_hourly
+
+for (v in names(clean_limits_vitals)) {
+  lo <- clean_limits_vitals[[v]][1]
+  hi <- clean_limits_vitals[[v]][2]
+  vitals_hourly_clean[[v]] <- ifelse(vitals_hourly_clean[[v]] < lo | vitals_hourly_clean[[v]] > hi, NA, vitals_hourly_clean[[v]])
+}
+
+```
+
+```{r}
+summary(vitals_hourly_clean)
+```
+
+
+```{r}
+vital_24hr <- vitals_hourly_clean |>
   filter(hr >= 0 & hr <= 24) |>
   group_by(icustay_id) |>
   summarise(
@@ -172,13 +205,36 @@ vital_24hr <- vitals_hourly |>
   ) |>
   ungroup()
 
-summary(vital_24hr)
-summary(vitals_hourly)
 
 ```
 #### lab measurements
 ```{r}
-lab_24hr <- labs_hourly |>
+# Adress the outliers
+clean_limits_labs <- list(
+  
+ bilirubin = c(0, 40),
+ platelets = c(1, 1000),
+ creatinine = c(0.1, 15)
+ 
+)
+
+
+labs_hourly_clean <- labs_hourly
+
+for (v in names(clean_limits_labs)) {
+  lo <- clean_limits_labs[[v]][1]
+  hi <- clean_limits_labs[[v]][2]
+  labs_hourly_clean[[v]] <- ifelse(labs_hourly_clean[[v]] < lo | labs_hourly_clean[[v]] > hi, NA, labs_hourly_clean[[v]])
+}
+
+```
+
+```{r}
+summary(labs_hourly_clean)
+```
+
+```{r}
+lab_24hr <- labs_hourly_clean |>
   filter(hr >= -24 & hr <= 24 ) |>
   group_by(icustay_id) |>
   summarise(
@@ -187,7 +243,7 @@ lab_24hr <- labs_hourly |>
     max_bilirubin_24h = max(bilirubin, na.rm = TRUE)
   )
 
-summary(labs_hourly)
+
 ```
 #### Comorbidity
 ```{r}
@@ -210,7 +266,7 @@ elixhauser <- comorbidity(
 ```
 
 ```{r}
-comorbidity_groups <- elixhauser %>%
+comorbidity_groups <- elixhauser |>
   mutate(
     comorb_cardio = as.integer(chf == 1 | carit == 1 | valv == 1 | pcd == 1 | pvd == 1),
     comorb_renal = as.integer(rf == 1),
@@ -219,7 +275,7 @@ comorbidity_groups <- elixhauser %>%
     comorb_cancer = as.integer(solidtum == 1 | metacanc == 1 | lymph == 1),
     comorb_liver = as.integer(ld == 1),
     comorb_other = as.integer(aids == 1 | rheumd == 1)
-  ) %>%
+  ) |>
   select(hadm_id, comorb_cardio, comorb_renal, comorb_pulm, comorb_diabetes, comorb_cancer, comorb_liver, comorb_other)
 
 comorbidity_groups$hadm_id = as.numeric(comorbidity_groups$hadm_id)
@@ -394,45 +450,12 @@ for (var in cat_vars) {
 ```
 
 
-#### 处理极端值
-```{r}
 
-clean_limits <- list(
-  age_years = c(16, 110),
-  min_gcs_24h = c(3, 15),
-  min_platelets_24h = c(1, 1000),
-  max_creatinine_24h = c(0.1, 15),
-  min_map_24h = c(20, 140),
-  min_sysbp_24h = c(40, 260),
-  max_hr_24h = c(20, 250),
-  max_resp_24h = c(5, 80),
-  min_spo2_24h = c(50, 100),
-  min_temp_24h = c(30, 42),
-  max_temp_24h = c(35, 43),
-  max_glucose_24h = c(40, 600),
-  max_bilirubin_24h = c(0, 40)
-)
-
-
-data_analy_clean <- merge
-
-for (v in names(clean_limits)) {
-  lo <- clean_limits[[v]][1]
-  hi <- clean_limits[[v]][2]
-  data_analy_clean[[v]] <- ifelse(data_analy_clean[[v]] < lo | data_analy_clean[[v]] > hi, NA, data_analy_clean[[v]])
-}
-
-```
-
-```{r}
-colSums(is.na(data_analy_clean[names(clean_limits)]))
-
-```
 
 #### Check the correlation between continuous variables
 
 ```{r}
-cor_mat <- cor(data_analy_clean[, con_vars], use = "pairwise.complete.obs", method = "spearman")
+cor_mat <- cor(data_merge[, con_vars], use = "pairwise.complete.obs", method = "spearman")
 
 var_order <- colnames(cor_mat)              
 cor_df <- as.data.frame(cor_mat)
@@ -481,17 +504,17 @@ make_box <- function(df, vars, title){
           strip.text = element_text(face="bold"))
 }
 
-make_box(data_analy_clean, vars_demo, "Demographics")
-make_box(data_analy_clean, vars_hemo, "Hemodynamic Variables")
-make_box(data_analy_clean, vars_resp, "Respiratory Variables")
-make_box(data_analy_clean, vars_temp, "Temperature Variables")
-make_box(data_analy_clean, vars_lab,  "Laboratory Results")
-make_box(data_analy_clean, vars_neuro,"Neurologic Status")
+make_box(data_merge, vars_demo, "Demographics")
+make_box(data_merge, vars_hemo, "Hemodynamic Variables")
+make_box(data_merge, vars_resp, "Respiratory Variables")
+make_box(data_merge, vars_temp, "Temperature Variables")
+make_box(data_merge, vars_lab,  "Laboratory Results")
+make_box(data_merge, vars_neuro,"Neurologic Status")
 ```
 
 #### ICU Type vs in-hospital outcome
 ```{r}
-data_analy_clean |>
+data_merge |>
   group_by(icu_type) |>
   summarise(
     mortality = mean(ifelse(death == 1, 1, 0)) * 100,
@@ -502,14 +525,14 @@ data_analy_clean |>
 
 
 ## Q1.1.3 Outliers and missing data handling
-Exploratory data analysis and data cleaning were performed after determine the cohort and extract the covariates. Errors can appear in data collection and entry, sanity check and distribution check suggested that extreme outliers that exceed the reasonable physiological range existed. For all continuous indicators, reasonable ranges were defined and any data points exceeding the ranges were regarded as data entry errors and marked as missing values (NA).
-Thorough missing data analysis were performed on the data and reported that extreme high missing rates over 85% in bedside measured vital signs including heart rate (max), SpO2 (min), respiratory rate (max), mean arterial pressure (min), body temperature (max & min), systolic blood pressure (min) and glucose (max). Bilirubin has a moderate missing rate over 50%, while platelets, GCS and creatinine had extremely low missing rate lower than 2%. The 2 observations with missing comorbidity information were deleted from the cohort, resulting in 32243 samples. Missing pattern check and visualization suggested that missing of vital signs presented high synchronization, with a missing correlation coefficient close to 1. The assumption that no measurement indicating rather stable condition was accepted. Normal value imputation was applied on bedside measurements and low missing rate variables. Missing of bilirubin has statistically significant association with the in-hospital outcome and ICU type, and Multiple Imputation by Chained Equations (MICE) (Azur, 2011) was applied to impute the variable. Given the joint missingness of vital signs, instead of creating separate missing markers for each variable, a new continuous variable was created to represent the number of missing indicators in vital signs covariates with high missing rates to avoid potential multilinearity caused by creating separate missing flags for each variable. A separate missing flag variable was created for bilirubin. 
+Exploratory data analysis and data cleaning were performed  through the whole data preprocessing. Errors can appear in data collection and entry, sanity check suggested that extreme outliers that exceed the reasonable physiological range existed in the original vital signs and laboratory measurements data. For all continuous indicators, reasonable ranges were defined and any data points exceeding the ranges were regarded as data entry errors and marked as missing values (NA).
+Thorough missing data analysis were performed on the merged data and reported that extreme high missing rates over 85% in bedside measured vital signs including heart rate (max), SpO2 (min), respiratory rate (max), mean arterial pressure (min), body temperature (max & min), systolic blood pressure (min) and glucose (max). Bilirubin, platelets, GCS and creatinine had extremely low missing rate lower than 2%. The 2 observations with missing comorbidity information were deleted from the cohort, resulting in 32243 samples. Missing pattern check and visualization suggested that missing of vital signs presented no statistically significant relationships with the ICU type and in-hospital outcomes. The assumption that no measurement indicating rather stable condition was accepted and normal value imputation was applied on bedside measurements and low missing rate variables.high synchronization, with a missing correlation coefficient close to 1.  Given the joint missingness of vital signs, instead of creating separate missing markers for each variable, a new continuous variable was created to represent the number of missing indicators in vital signs covariates with high missing rates to avoid potential multilinearity caused by creating separate missing flags for each variable.
 
 
 #### Check missing pattern
 
 ```{r}
-vis_miss(data_analy_clean, warn_large_data = FALSE) 
+vis_miss(data_merge, warn_large_data = FALSE) 
 
 ```
 
@@ -517,50 +540,41 @@ vis_miss(data_analy_clean, warn_large_data = FALSE)
 library(UpSetR)
 vars_high <- c("min_temp_24h","max_temp_24h","max_glucose_24h",
                "max_resp_24h","min_sysbp_24h","min_map_24h",
-               "max_hr_24h","min_spo2_24h","max_bilirubin_24h")
+               "max_hr_24h","min_spo2_24h")
 
 library(corrplot)
 
-mat <- is.na(data_analy_clean[vars_high]) * 1
+mat <- is.na(data_merge[vars_high]) * 1
 corr <- cor(mat)
 corrplot(corr, method = "color", tl.col="black", tl.cex = 0.8)
 ```
 
 ```{r}
 # Check the missing pattern
-vars_test <- c("min_map_24h","min_spo2_24h","max_hr_24h","max_resp_24h","min_sysbp_24h","max_glucose_24h", "min_temp_24h", "max_temp_24h", "max_bilirubin_24h")
+vars_test <- c("min_map_24h","min_spo2_24h","max_hr_24h","max_resp_24h","min_sysbp_24h","max_glucose_24h", "min_temp_24h", "max_temp_24h")
 
 for(v in vars_test){
-  data_analy_clean[[paste0("miss_",v)]] <- as.integer(is.na(data_analy_clean[[v]]))
+  data_merge[[paste0("miss_",v)]] <- as.integer(is.na(data_merge[[v]]))
   print(v)
-  print(summary(glm(data_analy_clean[[paste0("miss_",v)]] ~ death + icu_type +age_years,
-                    data=data_analy_clean, family=binomial)))
+  print(summary(glm(data_merge[[paste0("miss_",v)]] ~ death + icu_type +age_years,
+                    data=data_merge, family=binomial)))
 }
 
 ```
-There is no obvious missing  pattern of vital signs, while the missing of `max_bilirubin_24h` is not random.
-
- Although the high missing ratio, the variables are important potential confounders that reflecting the severity of the disease, clinical decision-making, and the intensity of monitoring.
-
-The vital signs variables will be imputed with normal values and `max_bilirubin_24h` will be imputed with MICE.
 
 ```{r}
-data_analy_clean <- data_analy_clean |>
+data_analy_clean <- data_merge |>
   filter(!if_any(starts_with("Comorb_"), is.na))
-dim(data_analy_clean)
+dim(data_merge)
 ```
-
-
-由于缺失模式检查发现vital signs 
 ```{r}
 vitals_missing_vars <- c("min_temp_24h", "max_temp_24h", "max_glucose_24h", "max_resp_24h", "min_sysbp_24h", "min_map_24h", "max_hr_24h", "min_spo2_24h")
 ```
 
 ```{r}
-data_imputed_normal <- data_analy_clean |>
+data_imputed_normal <- data_merge |>
   mutate(
-    vitals_missing_count = rowSums(across(all_of(vitals_missing_vars), ~ is.na(.x))),
-    max_bilirubin_24h_missing_flag = as.integer(is.na(max_bilirubin_24h))
+    vitals_missing_count = rowSums(across(all_of(vitals_missing_vars), ~ is.na(.x)))
   ) |>
   mutate(
      min_temp_24h = replace_na(min_temp_24h, 37.0),
@@ -573,7 +587,9 @@ data_imputed_normal <- data_analy_clean |>
      min_map_24h = replace_na(min_map_24h, 70), 
      max_hr_24h = replace_na(max_hr_24h, 90),
      min_spo2_24h = replace_na(min_spo2_24h, 98),
-     min_platelets_24h = replace_na(min_platelets_24h, 200)
+     min_platelets_24h = replace_na(min_platelets_24h, 200),
+     max_bilirubin_24h = replace_na(max_bilirubin_24h, 0.6)
+     
    ) |>
    mutate(
      across(ends_with("flag"), as.factor)
