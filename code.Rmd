@@ -40,6 +40,8 @@ library(caret)
 library(gtsummary)
 library(broom)
 library(kableExtra)
+library(glmnet)
+library(SHAPforxgboost)
 ```
 
 
@@ -88,7 +90,7 @@ print(duplicated_patient_cleaned)
 
 ```{r}
 dim(pt_icu_outcome)
-summary(pt_icu_outcome)
+
 ```
 
 # Question 1
@@ -126,35 +128,6 @@ data_filter <- data_filter |>
 
 dim(data_filter)
 
-
-
-
-data_merge <- data_filter |>
-  # Link the data tables with demographic information data
-  left_join(
-    icustays |> select(icustay_id, first_careunit),
-    by = "icustay_id"
-  ) |>
-  mutate(
-    icu_type = as.factor(first_careunit)
-  ) |>
-  
-  left_join(
-    patients |> select(subject_id, gender),
-    by = "subject_id"
-  ) |>
-  
-  left_join(
-    admissions |> select(hadm_id, admission_type, insurance, ethnicity),
-    by = "hadm_id"
-  ) |>
-  mutate(
-    death = as.factor(hospital_expire_flag), 
-    gender = as.factor(gender),               
-    insurance = as.factor(insurance),         
-    ethnicity = as.factor(ethnicity),         
-    admission_type = as.factor(admission_type)
-  )
 
 ```
 
@@ -265,14 +238,38 @@ head(comorbidity_groups)
 #### Merge the confounder variabels to the main dataframe
 ```{r Create the analysis dataframe for Question 1}
 # Select useful variables from the "data_merge"
-data_analysis <- data_merge |>
-  select(subject_id, hadm_id, icustay_id, age_years, gender, icu_type, admission_type, insurance, ethnicity, death) |>
+data_merge <- data_filter |>
+  # Link the data tables with demographic information data
+  left_join(
+    icustays |> select(icustay_id, first_careunit),
+    by = "icustay_id"
+  ) |>
+  mutate(
+    icu_type = as.factor(first_careunit)
+  ) |>
+  
+  left_join(
+    patients |> select(subject_id, gender),
+    by = "subject_id"
+  ) |>
+  
+  left_join(
+    admissions |> select(hadm_id, admission_type, insurance, ethnicity),
+    by = "hadm_id"
+  ) |>
+  select(subject_id, hadm_id, icustay_id, age_years, gender, icu_type, admission_type, insurance, ethnicity, hospital_expire_flag) |>
+  
   # Add the confounder variables to the dataframe
   left_join(gcs_24hr_min, by = "icustay_id") |>
   left_join(vital_24hr, by = "icustay_id") |>
   left_join(lab_24hr, by = "icustay_id") |>
   left_join(comorbidity_groups, by = "hadm_id") |>
   mutate(
+    death = as.factor(hospital_expire_flag), 
+    gender = as.factor(gender),               
+    insurance = as.factor(insurance),         
+    ethnicity = as.factor(ethnicity),         
+    admission_type = as.factor(admission_type),
     # Recode the ethnicity
     ethnicity = case_when(
       str_detect(ethnicity, "WHITE") ~ "WHITE",
@@ -281,19 +278,18 @@ data_analysis <- data_merge |>
       TRUE ~ "OTHER/UNKNOWN"
     ),
     ethnicity = as.factor(ethnicity)
-  )
+  ) 
 ```
 
- 
 
 ```{r}
 ###############################################################################
 ###################### EDA and further preprocessing ###########################
 ###############################################################################
 # Sanity check
-dim(data_analysis)
-str(data_analysis)
-summary(data_analysis)
+dim(data_merge)
+str(data_merge)
+summary(data_merge)
 ```
 
 #### Check missing values
@@ -311,8 +307,8 @@ missing_report_final <- data.frame(
 )
 
 # A loop to count missing values in all variables
-for (col_name in names(data_analysis)) {
-  current_col <- data_analysis[[col_name]]
+for (col_name in names(data_merge)) {
+  current_col <- data_merge[[col_name]]
   
   count <- sum(is.na(current_col))
   
@@ -345,7 +341,7 @@ con_vars <- c("age_years", "min_gcs_24h", "min_map_24h", "min_sysbp_24h",
               "max_bilirubin_24h" )
 
 for (var in  con_vars){
-  plot_data <- data_analysis |>
+  plot_data <- data_merge |>
     filter(!is.na(!!sym(var)))
   
   if (nrow(plot_data) > 10) {
@@ -382,7 +378,7 @@ format_percent <- function(x, digits = 1){
 }
 
 for (var in cat_vars) {
-  freq_table <- table(data_analysis[[var]], useNA = "always")
+  freq_table <- table(data_merge[[var]], useNA = "always")
   prop_table <- prop.table(freq_table)
   
   report <- data.frame(
@@ -418,7 +414,7 @@ clean_limits <- list(
 )
 
 
-data_analy_clean <- data_analysis
+data_analy_clean <- merge
 
 for (v in names(clean_limits)) {
   lo <- clean_limits[[v]][1]
@@ -503,13 +499,12 @@ data_analy_clean |>
   ) |>
   arrange(desc(mortality))
 ```
-根据这个选择使用MICU 作为模型拟合时的基线 class，因为MICU 的样本量最大，粗死亡率是最高的
+
 
 ## Q1.1.3 Outliers and missing data handling
 Exploratory data analysis and data cleaning were performed after determine the cohort and extract the covariates. Errors can appear in data collection and entry, sanity check and distribution check suggested that extreme outliers that exceed the reasonable physiological range existed. For all continuous indicators, reasonable ranges were defined and any data points exceeding the ranges were regarded as data entry errors and marked as missing values (NA).
-Thorough missing data analysis were performed on the data and reported that extreme high missing rates over 85% in bedside measured vital signs including heart rate (max), SpO2 (min), respiratory rate (max), mean arterial pressure (min), body temperature (max & min), systolic blood pressure (min) and glucose (max). Bilirubin has a moderate missing rate over 50%, while platelets, GCS and creatinine had extremely low missing rate lower than 2%. The 2 observations with missing comorbidity information were deleted from the cohort, resulting in 32243 samples. Missing pattern check and visualization suggested that missing of vital signs presented high synchronization, with a missing correlation coefficient close to 1. The assumption that no measurement indicating rather stable condition was accepted. Normal value imputation was applied on bedside measurements and low missing rate variables. Missing of bilirubin has statistically significant association with the in-hospital outcome and ICU type, and Multiple Imputation by Chained Equations (MICE) (Azur, 2011) was applied to impute the variable. Given the joint missingness of vital signs, instead of creating separate missing markers for each variable, a new continuous variable was created to represent the number of missing indicators in vital signs covariates with high missing rates. A separate missing flag variable was created for bilirubin. 
+Thorough missing data analysis were performed on the data and reported that extreme high missing rates over 85% in bedside measured vital signs including heart rate (max), SpO2 (min), respiratory rate (max), mean arterial pressure (min), body temperature (max & min), systolic blood pressure (min) and glucose (max). Bilirubin has a moderate missing rate over 50%, while platelets, GCS and creatinine had extremely low missing rate lower than 2%. The 2 observations with missing comorbidity information were deleted from the cohort, resulting in 32243 samples. Missing pattern check and visualization suggested that missing of vital signs presented high synchronization, with a missing correlation coefficient close to 1. The assumption that no measurement indicating rather stable condition was accepted. Normal value imputation was applied on bedside measurements and low missing rate variables. Missing of bilirubin has statistically significant association with the in-hospital outcome and ICU type, and Multiple Imputation by Chained Equations (MICE) (Azur, 2011) was applied to impute the variable. Given the joint missingness of vital signs, instead of creating separate missing markers for each variable, a new continuous variable was created to represent the number of missing indicators in vital signs covariates with high missing rates to avoid potential multilinearity caused by creating separate missing flags for each variable. A separate missing flag variable was created for bilirubin. 
 
-Vital signs的缺失基本是共同发生的，因此不对每个变量进行单独的缺失标志的创建，而是创建一个新的连续变量，用于表示患者在关键生理指标上的缺失数量。
 
 #### Check missing pattern
 
@@ -555,7 +550,7 @@ data_analy_clean <- data_analy_clean |>
 dim(data_analy_clean)
 ```
 
-### 保守填补并创建缺失标识
+
 由于缺失模式检查发现vital signs 
 ```{r}
 vitals_missing_vars <- c("min_temp_24h", "max_temp_24h", "max_glucose_24h", "max_resp_24h", "min_sysbp_24h", "min_map_24h", "max_hr_24h", "min_spo2_24h")
@@ -1239,12 +1234,16 @@ sensitivity_summary |>
 
 # Question 2
 ## Q2.1 Methods
-### Q2.1.2 Data source and cohort
+### Q2.1.1 Data source and cohort
 The same data MIMIC-III v1.4 was used in Question 2.
 
 MIMIC-III v1.4 contains 53423 distinct hospital admissions, and during each admission a patient could have stayed in ICU more than once. The project started with 61532 total ICU stay encounters after removing a duplicated ICU stay encounter (unique ICU stay ID = 229922).
 
-In this question, the analysis was based on unique ICU stay encounters rather than unique patient identifiers, which resulted in a total of 38509 unique ICU stay. The admissions without clear hospital outcome are also remove, resulting in 32,245 unique ICU stay.
+In this question, the analysis was based on unique ICU stay encounters of adult patients rather than unique patient identifiers, which resulted in a total of 53332 unique ICU stays. ICU stays with length of stay less than 24 hours or had no length of stay data were removed, resulting in 45253 unique ICU stays. There were 198149 vital signs measurements records with in the first 24 hours, and these measurements belonged to 8972 unique ICU stays. Inner join was performed to link the vital signs to the ICU stays table, resulting the total ICU stays reduced to 6618 unique ICU stays.
+
+
+### Q2.1.2 Data preprocessing
+Clinical range truncation was used to clean the outliers in vital signs. For all continuous indicators, reasonable ranges were defined and any data points exceeding the ranges were clamped to the acceptable ranges. No missing values reported in demographic variables. Missing values examination reported that glucose and temperature had missing rates over 70%, heart rate, SpO$_2$, systolic blood pressure and mean arterial pressure had missing rates of 10%~20%. For each unique ICU encounter, missing time-ordered vital signs measurements were addressed using last observation carried forward and next observation carried backward imputation(Harutyunyan, 2019). A binary missingness flags were created  for each imputed vitals signs. The remained missing values after the imputation were filled with 0 and marked with missing flags to mitigate bias.
 
 ```{r}
 data_filter2 <- pt_icu_outcome |>  
@@ -1254,7 +1253,7 @@ data_filter2 <- pt_icu_outcome |>
 dim(data_filter2)  
 
 # Filter ICU stays with los less than 24h
-data_filter <- data_filter |>  
+data_filter2 <- data_filter2 |>  
   filter(los >= 1) 
 dim(data_filter2)
 
@@ -1265,55 +1264,12 @@ data_filter2 <- data_filter2 |>
 
 dim(data_filter2)
 
-# Link the data tables
-data_merge2 <- data_filter2 |>
-  
-  left_join(
-    icustays |> select(icustay_id, first_careunit),
-    by = "icustay_id"
-  ) |>
-  mutate(
-    icu_type = as.factor(first_careunit)
-  ) |>
-  
-  left_join(
-    patients |> select(subject_id, gender),
-    by = "subject_id"
-  ) |>
-  
-  left_join(
-    admissions |> select(hadm_id, admission_type, insurance, ethnicity),
-    by = "hadm_id"
-  ) |>
-  
-  left_join(
-    comorbidity_groups, by = "hadm_id"
-  ) |>
-  
-  mutate(
-    # Binary indicator of length of stay
-    prolonged_los = factor(ifelse(los >= 7, 1,0),
-                           levels = c(0,1),
-                           labels = c("short stay", "prolonged stay")),
-    gender = as.factor(gender),               
-    insurance = as.factor(insurance),         
-    ethnicity = as.factor(ethnicity),         
-    admission_type = as.factor(admission_type),
-    first_careunit = as.factor(first_careunit),
-    
-    # Recode the ethnicity
-    ethnicity = case_when(
-      str_detect(ethnicity, "WHITE") ~ "WHITE",
-      str_detect(ethnicity, "BLACK|AFRICAN AMERICAN") ~ "BLACK",
-      str_detect(ethnicity, "HISPANIC|LATINO") ~ "HISPANIC",
-      TRUE ~ "OTHER/UNKNOWN"
-    ),
-    ethnicity = as.factor(ethnicity)
-  ) |>
 ```
-
-
 ```{r}
+dim(vitals_hourly)
+```
+```{r}
+# Define the reasonable ranges
 hr_lower <- 20
 hr_upper <- 250
 resp_lower <- 5
@@ -1332,6 +1288,7 @@ glucose_upper <- 600
 ```
 
 ```{r}
+# 24h data extraction and outlier cleaning
 vitals_24hr_clean <- vitals_hourly |>
   filter(hr >= 0 & hr <= 24) |>
  
@@ -1372,482 +1329,97 @@ vitals_24hr_clean <- vitals_hourly |>
       TRUE ~ glucose 
     )
   ) |>
-  select(icustay_id, map_clean, hr_clean, resp_clean, sysbp_clean, spo2_clean, temp_clean, glucose_clean) 
-```
-
-
-```{r}
-
-colSums(is.na(vitals_24hr_clean))
+  select(icustay_id, hr, map_clean, hr_clean, resp_clean, sysbp_clean, spo2_clean, temp_clean, glucose_clean) 
 ```
 
 ```{r}
-# Convert to long form
-vitals_long <- vitals_24hr_clean |>
-  pivot_longer(
-    cols = c(hr_clean, map_clean, sysbp_clean,temp_clean, glucose_clean, spo2_clean, resp_clean),
-    names_to = "variable",
-    values_to = "value"
+dim(vitals_24hr_clean)
+summary(vitals_24hr_clean)
+
+n_unique_icustay <- n_distinct(vitals_24hr_clean$icustay_id)
+n_unique_icustay
+```
+```{r}
+####################################################
+# Visualize the missing values in vital signs      #
+####################################################
+
+# Initialize a data frame
+missing_vitals <- data.frame(
+  variable = character(),
+  na_count = numeric(),
+  na_percent = character(),
+  stringsAsFactors = FALSE
+)
+
+# A loop to count missing values in all variables
+for (col_name in names(vitals_24hr_clean)) {
+  current_col <- vitals_24hr_clean[[col_name]]
+  
+  count <- sum(is.na(current_col))
+  
+  ratio <- mean(is.na(current_col))
+  
+  new_row <- data.frame(
+    variable = col_name,
+    na_count = count,
+    na_percent = scales::percent(ratio, accuracy = 0.1),
+    stringsAsFactors = FALSE
   )
-
-# Feature engineering
-quantile_features <- vitals_long |>
-  group_by(icustay_id, variable) |>
-  mutate(
-    mean_val = mean(value, na.rm = TRUE),
-    sd_val = sd(value, na.rm = TRUE)
-  ) |>
-  mutate(z = (value - mean_val)/sd_val) |>
   
-  mutate(
-    q_low = quantile(z, 0.25, na.rm = TRUE),
-    q_high = quantile(z, 0.75, na.rm = TRUE)
-  ) |>
-  
-  mutate(keep = z <= q_low | z >= q_high) |>
-  
-  summarise(
-    n = n(),
-    origin_mean = mean(value, na.rm = TRUE),
-    origin_sd = ifelse(sum(!is.na(value)) > 1, sd(value, na.rm = TRUE),
-                         ifelse(sum(!is.na(value)) == 1, 0, NA_real_)),
-    mod_mean = ifelse(sum(keep, na.rm = TRUE) > 0,
-                      mean(value[keep], na.rm = TRUE),
-                      NA_real_),
-    mod_sd   = ifelse(sum(keep, na.rm = TRUE) > 1,
-                      sd(value[keep], na.rm = TRUE),
-                      ifelse(sum(keep, na.rm = TRUE) == 1, 0, NA_real_)),
-    quant_pct = ifelse(n > 0, sum(keep, na.rm = TRUE)/n, NA_real_),
-    .groups = "drop"
-  ) |>
-  
-  pivot_wider(
-    names_from = variable, 
-    values_from = c(origin_mean, origin_sd, mod_mean, mod_sd, quant_pct),
-    names_glue = "{variable}_{.value}"
-  ) |>
-  
-  mutate(across(
-    where(is.numeric),
-    function(x) ifelse(is.na(x), 1, 0),
-    .names = "{.col}_missing"
-  )) |>
-  select(-icustay_id_missing, -n_missing)
-
-```
-
-```{r}
-colSums(is.na(quantile_features))
-```
-```{r}
-quantile_features_imputed <- quantile_features |>
-  mutate(
-    across(contains("map_clean_") & ends_with("_mean"), ~replace_na(.x, 85)),
-    across(contains("hr_clean_") & ends_with("_mean"), ~replace_na(.x, 90)),
-    across(contains("resp_clean_") & ends_with("_mean"), ~replace_na(.x, 18)),
-    across(contains("sysbp_clean_") & ends_with("_mean"), ~replace_na(.x, 120)),
-    across(contains("spo2_clean_") & ends_with("_mean"), ~replace_na(.x, 98)),
-    across(contains("temp_clean_") & ends_with("_mean"), ~replace_na(.x, 37)),
-    across(contains("glucose_clean_") & ends_with("_mean"), ~replace_na(.x, 120))
-  ) 
-  
-```
-为避免数据泄露，sd的插补只用训练集上的中位数进行插补
-
-```{r}
-
-  
-  inner_join(
-    quantile_features_imputed,
-    by = "icustay_id"
-  ) |> 
-  drop_na(comorb_cardio, comorb_pulm, comorb_cancer, comorb_other,
-          comorb_renal, comorb_diabetes, comorb_liver) |>
-  
-  select(-row_id, -dob, -admittime, -dischtime, -intime, -outtime, -hosp_deathtime, -icu_expire_flag, -hospital_expire_flag, -dod, -expire_flag, -ttd_days, -n, -los )
-```
-
-```{r}
-
-data_ml_ready <- data_merge2 |>
-  mutate(
-    prolonged_los = ifelse(prolonged_los == "prolonged stay", 1, 0)
-  ) |>
-  fastDummies::dummy_cols(remove_first_dummy = TRUE, remove_selected_columns = TRUE)
-str(data_ml_ready)
-```
-
-```{r}
-set.seed(42)
-ids <- unique(data_ml_ready$subject_id)       
-train_ids <- sample(ids, size = floor(0.8 * length(ids)))
-train_idx <- data_ml_ready$subject_id %in% train_ids
-
-train_df <- data_ml_ready[train_idx, ]
-test_df  <- data_ml_ready[!train_idx, ]
-```
-
-```{r}
-sd_cols_train <- names(train_df)[grepl("_sd$", names(train_df))]
-num_na_cols_train <- names(train_df)[sapply(train_df, function(x) is.numeric(x) && any(is.na(x)))]
-cols_for_median <- union(sd_cols_train, num_na_cols_train)
-median_par <- sapply(train_df[cols_for_median], function(x) median(x, na.rm = TRUE))
-```
-
-
-```{r}
-impute_with_median_par <- function(df, par_named_vec){
-  df|>
-    mutate(across(all_of(names(par_named_vec)),
-                  ~ ifelse(is.na(.x), par_named_vec[[cur_column()]], .x)))
+  missing_vitals <- bind_rows(missing_vitals, new_row)
 }
 
-train_imp <- impute_with_median_par(train_df, median_par)
-test_imp <- impute_with_median_par(test_df, median_par)
-```
+missing_vitals <- missing_vitals %>%
+  arrange(desc(na_count))
 
-```{r}
-table(train_imp$prolonged_los)
-table(test_imp$prolonged_los)
-```
-```{r}
-# Create DMatrix
-dtrain <- xgb.DMatrix(as.matrix(select(train_imp, -prolonged_los)), label = train_imp$prolonged_los)
-dtest <- xgb.DMatrix(as.matrix(select(test_imp, -prolonged_los)), label = test_imp$prolonged_los)
-```
-
-
-Baseline model
-```{r}
-basic_params <- list(
-    objective = "binary:logistic",
-    eval_metric = "auc",
-    max_depth = 6,
-    eta = 0.1,
-    subsample = 0.8,
-    colsample_bytree = 0.8,
-    min_child_weight = 1
-)
+print(missing_vitals)
 ```
 
 
 ```{r}
-xgb_basic <- xgb.train(
-  params = basic_params,
-  data = dtrain,
-  nrounds = 200,
-  watchlist = list(train = dtrain, test = dtest),
-  early_stopping_rounds = 20,
-  print_every_n = 20
-)
-```
-
-```{r}
-# Simple evaluation of the baseline model
-pred_basic <- predict(xgb_basic, dtest)
-roc_basic <- roc(test_imp$prolonged_los, pred_basic)
-auc_basic <- auc(roc_basic)
-cat("Baseline Test AUC:", auc_basic, "\n")
-```
-
-```{r}
-plot(roc_basic, col = "#4DB6AC", main = "ROC Curve - Baseline Model")
-```
-
-Fine-tuning  
-
-```{r}
-# Define hyper-parameters
-param_grid <- expand.grid(
-  max_depth = c(4L,5L,6L),
-  eta = c(0.05, 0.1),
-  subsample = c( 0.8),
-  colsample_bytree = c(0.8),
-  min_child_weight = c(1,2),
-  gamma = c(0,0.5),
-  KEEP.OUT.ATTRS = FALSE
-)
-```
-
-```{r}
-positive <- sum(train_imp$prolonged_los == 1)
-negative <- sum(train_imp$prolonged_los == 0)
-scale_pos_weight <- negative/positive
-scale_pos_weight
-```
-
-Circular cross-validation
-```{r}
-best_auc <- 0
-best_params <- list()
-
-for (i in 1:nrow(param_grid)){
-  params <- list(
-    objective = "binary:logistic",
-    eval_metric = c("auc", "logloss"),
-    max_depth = param_grid$max_depth[i],
-    eta = param_grid$eta[i],
-    subsample = param_grid$subsample[i],
-    colsample_bytree = param_grid$colsample_bytree[i],
-    min_child_weight = param_grid$min_child_weight[i],
-    scale_pos_weight = scale_pos_weight,
-    gamma = param_grid$gamma[i]
-    
-  )
-  
-  cat("\nRunning CV", i, "of", nrow(param_grid), "\n")
-  
-  cv_result <- xgb.cv(
-    params = params,
-    data = dtrain,
-    nrounds = 300,
-    nfold = 5,
-    metrics = c("auc", "logloss"),
-    early_stopping_rounds = 20,
-    verbose = FALSE
-  )
-  
-  best_iter <- cv_result$best_iteration
-  mean_auc <- max(cv_result$evaluation_log$test_auc_mean)
-  
-  if (mean_auc > best_auc){
-    best_auc <- mean_auc
-    best_params <- params
-    best_nrounds <- best_iter
-    }
-}
-
-cat("\nBest AUC:", best_auc, "\n")
-print(best_params)
-cat("Best nround:", best_nrounds,"\n")
-```
-
-Use the best parameters to train the model
-```{r}
-xgb_best <- xgb.train(
-  params = best_params,
-  data = dtrain,
-  nrounds = best_nrounds,
-  watchlist = list(train = dtrain, test = dtest),
-  early_stopping_rounds = 20,
-  print_every_n = 20
-)
-```
-
-The model does not improved much than the baseline model.
-Evaluate the current fine-tuned model first.
-
-```{r}
-pred_prob <- predict(xgb_best, dtest)
-pred_class <- ifelse(pred_prob >= 0.5, 1, 0)
-truth <- test_imp$prolonged_los
-
-confusionMatrix(factor(pred_class), factor(truth))
-roc_obj <- roc(truth, pred_prob)
-plot(roc_obj, col = "#4DB6AC")
-auc(roc_obj)
-
-```
-The high sensitivity and low specificity suggest that the model gives more importance to the most class(class 0).
-
-Run another fine-tuning 
-
-```{r}
-# Search sets of parameters more powerful
-param_grid <- expand.grid(
-  max_depth = c(3L, 4L),
-  eta = c(0.01, 0.03),
-  min_child_weight = c(5, 6),
-  subsample = c(0.7,0.8),
-  colsample_bytree = c(0.7),
-  gamma = c(2, 3),
-  scale_pos_weight = scale_pos_weight
-)
-
-best_auc <- 0
-best_params <- list()
-
-for (i in 1:nrow(param_grid)){
-  params <- list(
-    objective = "binary:logistic",
-    eval_metric = "auc",
-    max_depth = param_grid$max_depth[i],
-    eta = param_grid$eta[i],
-    subsample = param_grid$subsample[i],
-    colsample_bytree = param_grid$colsample_bytree[i],
-    min_child_weight = param_grid$min_child_weight[i],
-    scale_pos_weight = scale_pos_weight,
-    gamma = param_grid$gamma[i]
-    
-  )
-  
-  cat("\nRunning CV", i, "of", nrow(param_grid), "\n")
-  
-  cv_result <- xgb.cv(
-    params = params,
-    data = dtrain,
-    nrounds = 5000,
-    nfold = 5,
-    metrics = c("auc","logloss"),
-    early_stopping_rounds = 50,
-    verbose = FALSE
-  )
-  
-  best_iter <- cv_result$best_iteration
-  mean_auc <- max(cv_result$evaluation_log$test_auc_mean)
-  
-  if (mean_auc > best_auc){
-    best_auc <- mean_auc
-    best_params <- params
-    best_nrounds <- best_iter
-    }
-}
-
-cat("\nBest AUC:", best_auc, "\n")
-print(best_params)
-cat("Best nround:", best_nrounds,"\n")
-```
-```{r}
-xgb_best <- xgb.train(
-  params = best_params,
-  data = dtrain,
-  nrounds = best_nrounds,
-  watchlist = list(train = dtrain, test = dtest),
-  early_stopping_rounds = 50,
-  print_every_n = 50
-)
-```
-```{r}
-pred_prob <- predict(xgb_best, dtest)
-pred_class <- ifelse(pred_prob >= 0.55, 1, 0)
-truth <- test_imp$prolonged_los
-
-confusionMatrix(factor(pred_class), factor(truth))
-roc_obj <- roc(truth, pred_prob)
-plot(roc_obj, col = "#4DB6AC")
-auc(roc_obj)
-```
-
-
-```{r}
-# 假设 lgb_pred_prob 已经包含测试集的预测概率
-
-thresholds <- seq(0.1, 0.6, by = 0.05)
-best_balanced_acc <- 0
-best_threshold <- 0
-
-cat("--- 阈值优化结果 ---\n")
-
-for (t in thresholds) {
-    # 预测类别
-    pred_class <- ifelse(pred_prob >= t, 1, 0) # 假设 1 是延长住院
-
-    # 计算混淆矩阵（需要 pROC 或 caret 包）
-    conf_mat <- confusionMatrix(factor(pred_class), factor(y_test), positive = "1") # 假设 1 是延长住院的 'Positive' 类
-
-    # 提取 Balanced Accuracy
-    bal_acc <- conf_mat$byClass["Balanced Accuracy"] 
-
-    cat(paste0("Threshold: ", format(t, digits=2), 
-               ", Balanced Acc: ", format(bal_acc, digits=4), "\n"))
-
-    if (bal_acc > best_balanced_acc) {
-        best_balanced_acc <- bal_acc
-        best_threshold <- t
-    }
-}
-
-cat("\n--- 最佳结果 ---\n")
-cat(paste0("最佳阈值: ", best_threshold, ", 最佳平衡准确率: ", format(best_balanced_acc, digits=4), "\n"))
-```
-
-
-
-
-
-
-
-```{r}
-hr_lower <- 20
-hr_upper <- 250
-resp_lower <- 5
-resp_upper <- 80
-sysbp_lower <- 40
-sysbp_upper <- 260
-map_upper <- 30
-map_lower <- 160
-spo2_lower <- 50
-spo2_upper <- 100
-temp_lower <- 30
-temp_upper <- 43
-glucose_lower <- 40
-glucose_upper <- 600
-
-```
-
-```{r}
-vitals_24hr_clean <- vitals_hourly |>
-  filter(hr >= 0 & hr <= 24) |>
- 
+vitals_24hr_flags <- vitals_24hr_clean|>
   mutate(
-    map_clean = case_when(
-      meanarterialpressure < map_lower ~ map_lower,
-      meanarterialpressure > map_upper ~ map_upper,
-      TRUE ~ meanarterialpressure
-    ),
-    resp_clean = case_when(
-      resprate < resp_lower ~ resp_lower,
-      resprate > resp_upper ~ resp_upper,
-      TRUE ~ resprate
-    ),
-    sysbp_clean = case_when(
-      sysbp < sysbp_lower ~ sysbp_lower,
-      sysbp > sysbp_upper ~ sysbp_upper,
-      TRUE ~ sysbp
-    ),
-    hr_clean = case_when(
-      heartrate < hr_lower ~ hr_lower,
-      heartrate > hr_upper ~ hr_upper,
-      TRUE ~ heartrate
-    ),
-    spo2_clean = case_when(
-      spo2 < spo2_lower ~ spo2_lower,
-      spo2 > spo2_upper ~ spo2_upper,
-      TRUE ~ spo2
-    ),
-    temp_clean = case_when(
-      temperature < temp_lower ~ temp_lower,
-      temperature > temp_upper ~ temp_upper,
-      TRUE ~ temperature
-    ),
-    glucose_clean = case_when(
-      glucose < glucose_lower ~ glucose_lower,
-      glucose > glucose_upper ~ glucose_upper,
-      TRUE ~ glucose 
-    )
-  ) |>
-  select(icustay_id, hr,map_clean, hr_clean, resp_clean, sysbp_clean, spo2_clean, temp_clean, glucose_clean) 
-```
+   glucose_missing_flag = is.na(glucose_clean),
+   temp_missing_flag = is.na(temp_clean),
+   sysbp_missing_flag = is.na(sysbp_clean),
+   map_missing_flag = is.na(map_clean),
+   resp_missing_flag = is.na(resp_clean),
+   spo2_missing_flag = is.na(spo2_clean),
+   hr_missing_flag = is.na(hr_clean)
+  )
 
+fill_cols <- c("glucose_clean", "temp_clean", "sysbp_clean", "map_clean", "resp_clean", "spo2_clean", "hr_clean") 
 
-```{r}
-
-vitals_24hr_locf <- vitals_24hr_clean %>%
-  group_by(icustay_id) %>% 
+vitals_24hr_locf <- vitals_24hr_flags |>
+  group_by(icustay_id) |>
   
   # Rank the records by time
-  arrange(hr, .by_group = TRUE) %>% 
+  arrange(hr, .by_group = TRUE) |>
   
-  fill(names(.)[!(names(.) %in% c("icustay_id", "hr"))], .direction = "down") %>%
   
-  fill(names(.)[!(names(.) %in% c("icustay_id", "hr"))], .direction = "up") %>%
+  fill(!!!syms(fill_cols), .direction = "down") |>
+  fill(!!!syms(fill_cols), .direction = "up") |>
+
+  mutate(
+    across(all_of(fill_cols),~replace_na(., 0))
+  ) |>
   
   ungroup()
 ```
 
+```{r}
+colSums(is.na(vitals_24hr_locf))
+```
+
+
+### Q2.1.2 Variable and feature engineering
+The predicted LOS was defined by two classes. LOS equal to or longer than 7 days is defined as prolonged ICU stay, while LOS below 7 days was defined as non-prolonged ICU stay. Demographics and administrative including age, gender, ethnicity, insurance, admission type, ICU type and comorbidity diagnosis are used as predictors. The vital signs features were constructed with a quantiles approach (Alghatani, 2021), which emphasize the high and low quantiles of a sample to provide the model with dynamic changes of the condition. Z-score standardization was used to standardize the vital signs of each ICU stay were standardized with Z-score and interquantile thresholds (Q1 25% and Q5 75%) were calculated based on the standardized values.The vital sign observations that only belong to the Q1 and Q4 intervals were extracted from the original observations, and modified mean, modified SD and quantile percentage were calculated based on these observations. Each vital sign feature were constructed as 5 variables including original mean, original SD, modified mean, modified SD and quantile percentage.
 
 
 ```{r}
+####################################################################################
+############################  Quantile  approach ###################################
 # Convert to long form
 Vitals_long <- vitals_24hr_locf %>% 
   pivot_longer(
@@ -1903,15 +1475,25 @@ quantile_features <- Vitals_long |>
 ```
 
 ```{r}
+dim(quantile_features)
+colSums(is.na(quantile_features))
+```
+
+
+```{r}
 # Replace NA with 0
 quantile_features_safe <- quantile_features |>
   mutate(across(everything(), ~replace_na(., 0)))
 ```
 
 ```{r}
-# Merge with demographics and comorbidty data
-data_merge2 <- pt_icu_outcome |>
-  # Link the data tables
+dim(quantile_features_safe)
+colSums(is.na(quantile_features_safe))
+```
+```{r}
+# Link the data tables
+data_merge2 <- data_filter2 |>
+  
   left_join(
     icustays |> select(icustay_id, first_careunit),
     by = "icustay_id"
@@ -1930,17 +1512,6 @@ data_merge2 <- pt_icu_outcome |>
     by = "hadm_id"
   ) |>
   
-  left_join(
-    comorbidity_groups, by = "hadm_id"
-  ) |>
-  
-  
-  # Filter records of patients age >= 18
-  filter(age_years >= 18) |>
-    
-  # Ensure exist of hospital outcome
-  filter(!is.na(los)) |>
-
   mutate(
     # Binary indicator of length of stay
     prolonged_los = factor(ifelse(los >= 7, 1,0),
@@ -1961,22 +1532,82 @@ data_merge2 <- pt_icu_outcome |>
     ),
     ethnicity = as.factor(ethnicity)
   ) |>
+  select(subject_id, hadm_id, icustay_id, age_years, gender, icu_type, admission_type, insurance, ethnicity, prolonged_los)|>
+  
+  left_join(
+    comorbidity_groups, by = "hadm_id"
+  )
+
+dim(data_merge2)
+```
+
+```{r}
+summary(data_merge2)
+```
+
+```{r}
+# Merge with demographics and comorbidty data
+data_analysis <- data_merge2 |>
   
   inner_join(
     quantile_features_safe,
     by = "icustay_id"
-  ) |> 
-  
-  # Remove the one record with missing comorbidity information
-  drop_na(comorb_cardio, comorb_pulm, comorb_cancer, comorb_other,
-          comorb_renal, comorb_diabetes, comorb_liver) |>
-  
-  select(-row_id, -dob, -admittime, -dischtime, -intime, -outtime, -hosp_deathtime, -icu_expire_flag, -hospital_expire_flag, -dod, -expire_flag, -ttd_days, -n, -los)
+  ) |>
+  select(-n)
+
+
 ```
 
+```{r}
+dim(data_analysis)
+
+colSums(is.na(data_analysis))
+```
+```{r}
+###################################################################################
+############################### Demographic results ###############################
+demo_vars <- c("age_years", "gender", "icu_type", "admission_type", "insurance", "ethnicity", "comorb_cardio", "comorb_renal", "comorb_pulm", "comorb_diabetes", "comorb_cancer", "comorb_liver", "comorb_other", "prolonged_los")
+
+data_analysis |>
+  select(all_of(demo_vars)) |>
+  mutate(
+    across(starts_with("comorb_"), ~factor(.x, levels = c("0","1"), labels = c("No","Yes")))
+  ) |>
+  tbl_summary(
+    statistic = list(
+      all_continuous() ~ "{mean} ({sd})",
+      all_categorical() ~ "{n} ({p}%)"
+    ),
+    digits = list(
+      all_continuous() ~ 1, 
+      all_categorical() ~ 1
+    ),
+    missing = "ifany",
+    label = list(
+      age_years ~ "Age (years)",
+      gender ~ "Gender",
+      admission_type ~ "Admission Type", 
+      insurance ~ "Insurance",
+      ethnicity ~ "Ethnicity",
+      icu_type ~ "ICU Type",
+      comorb_cardio ~ "Cardiovascular Comorbidity", 
+      comorb_renal ~ "Renal Comorbidity",
+      comorb_pulm ~ "Pulmonary Comorbidity", 
+      comorb_diabetes ~ "Diabetes", 
+      comorb_cancer ~ "Cancer", 
+      comorb_liver ~ "Liver Disease", 
+      comorb_other ~ "Other Comorbidity",
+      prolonged_los ~ "Prolonged Length of Stay in ICU"
+    )
+  ) |>
+  modify_header(label = "**Variable**") |>
+  bold_labels()
+```
 
 ```{r}
-data_ml_ready <- data_merge2 |>
+#############################################################################
+###################### Final Preparation for ML##############################
+data_ml_ready <- data_analysis|>
    mutate(
     prolonged_los = ifelse(prolonged_los == "prolonged stay", 1, 0)
   ) |>
@@ -1987,8 +1618,12 @@ data_ml_ready <- data_merge2 |>
 )
 ```
 
-
 ```{r}
+dim(data_ml_ready)
+str(data_ml_ready)
+```
+```{r}
+
 # Set random seed
 set.seed(42)
 ids <- unique(data_ml_ready$subject_id)
@@ -1999,27 +1634,109 @@ train_data <- data_ml_ready[train_idx, ]
 test_data <- data_ml_ready[!train_idx, ]
 
 # Remove all ID columns
-train_data <- train_data %>% select(-subject_id, -hadm_id, -icustay_id)
-test_data <- test_data %>% select(-subject_id, -hadm_id, -icustay_id)
+train_data <- train_data |> select(-subject_id, -hadm_id, -icustay_id)
+test_data <- test_data |> select(-subject_id, -hadm_id, -icustay_id)
 
+
+# ----------------Data preparation for LR baseline------------
+x_train <- as.matrix(train_data |> select(-prolonged_los))
+x_test  <- as.matrix(test_data  |> select(-prolonged_los))
+y_train <- train_data$prolonged_los
+y_test  <- test_data$prolonged_los
+
+
+```
+
+```{r}
+# -----------------Data preparation for XGB model----------
 # Create DMatrix
 y_train <- as.numeric(as.character(train_data$prolonged_los))
 y_test <- as.numeric(as.character(test_data$prolonged_los))
 
 dtrain <- xgboost::xgb.DMatrix(
-  data = as.matrix(train_data %>% select(-prolonged_los)), 
+  data = as.matrix(train_data |> select(-prolonged_los)), 
   label = y_train
 )
 
 dtest <- xgboost::xgb.DMatrix(
-  data = as.matrix(test_data %>% select(-prolonged_los)), 
+  data = as.matrix(test_data |> select(-prolonged_los)), 
   label = y_test
 )
 ```
 
-### Baseline model
+### Q2.1.3 Model selection and application
+The dataset was split into 80% training set and 20% test set. The split was performed according to unique patients subject ID to ensure that data belonging to one patient do not appear in both training set and test set. The models were trained using the training set and tested the performance using the unseen testing set.
+Logistic regression and extreme gradient boosting (XGBoost) machine learning algorithms were used for the binary classification model. To avoid overfitting, 10-fold cross-validation was used on the training set. Logistic regression model was fitted as a baseline model, and LASSO was used to avoid overfitting. XGBoost is an extension of the gradient boosting of gradient boosting algorithm, which combines weak learners sequentially (Chen, 2016; Wiens, 2025). XGBoost is capable of capturing  more complex  nonlinear relationships and feature interactions than traditional linear models. A baseline XGBoost model was fitted and then fine-tuned through grid search to improve the ability of generalization. The hyperparameters for parameter tuning include：
+Learning Rate: The step size shrinkage used to prevent overfitting. Learning rate was explored among 0.01, 0.03 and 0.05.
+Maximun Depth: The maximum depth of a tree. Values were considered from 2 to 5.
+Gamma: The minimum loss reduction required to make a further partition on a leaf node. Values from 0 to 5.
+Subsample ratio of training instances (subsample): Fixed to 0.7.
+Subsample ratio of features (colsample_bytree): Fixed to 0.7.
+Weight for positive class (scale_pos_weight): Calculate by Negative class/Positive class.
+Minimum sum of instance weight (hessian) needed in a child (min_child_weight): Explored among 5 and 6.
+
+### Q2.1.4 Model evaluation
+To evaluate the models performance on training and test set, the metrics evaluated include: AUROC, accuracy, sensitivity, specificity, PPV, NPV. The 95% confidence intervals were also calculated.
+## Q2.2 Results
+
+### Q2.2.1 Descriptive statistics of cohort
+Totally 6,618 ICU stays were included in the analysis, among which there are 1066 prolonged ICU stays (16.1%). The overall age mean of the patients was 63.8 (16.8). The proportion of male patients is higher, at 56.1%. The study population was mainly white, accounting for 71.6%. Most of the patients (82.5%) were admitted to the hospital through emergency. Most patients payed through  Medicare (55.7%) or private (31.7%) insurance. The Medical Intensive Care Unit (MICU) is the most common type of ICU, admitting 38.4% of patients. Other major types include cardiothoracic surgery recovery units (CSRUs), surgical intensive care units (SICUs), and coronary care units (CCUs). Cardiovascular comorbidity is the most common in CCU (59.2%), while the proportion pulmonary comorbidity reached 54.8%. 
+
+
+### Q2.2.2 Binary Classification model results
+Table X shows the performance of the binary classifications models. LR model XGB baseline model demonstrated the very closed accuracy of 0.832 and 0.830, while fine-tuned XGB models only has accuracy of 0.715. In. terms of sensitivity and specificity, LR and XGB baseline models has higher specificity values of 0.994 and 0.991, while the sensitivity values are 0.018 and 0.023. Fine-tuned XGB model showed sensitivity and specificity of 0.534 and 0.752, indicating significantly improved ability to predict positive categories. All models have acceptable performance on NPV, among which fine-tuned XGB model the highest NPV of 0.890. The PPV of the LR and XGB (Baseline) models is relatively low (0.364 and 0.333, respectively), while fine_tuned XGB model has PPV of 0.300.
+Table X demonstrate the AUROC of both training and test set of three models. Baseline XBG model achieved the highest AUROC on the training set, but the AUROC on the test set was only 0.678, indicating a rather serious overfitting. The fine-tuned XGB model showed an AUROC of the training set decreased to 0.818, but the AUROC of the test set increased o.681, indicating an improvement in the generaliaztion. The AUROC of the LR test set was 0.658, which was the lowest among the three models.
 
 ```{r}
+#################################################################################
+######################## Baseline Logistic Regression Model######################
+set.seed(42)
+LR_lasso_mod <- cv.glmnet(
+  x = x_train,
+  y = y_train,
+  family = "binomial",
+  alpha = 1,
+  nfolds = 10,
+  type.measure = "auc"
+)
+```
+
+```{r}
+plot(LR_lasso_mod)
+
+LR_lasso_mod$lambd.min
+LR_lasso_mod$lambd.1se
+```
+
+```{r}
+pred_lr <- predict(
+  LR_lasso_mod,
+  newx = x_test,
+  s = "lambda.min",
+  type = "response"
+)
+
+head(pred_lr)
+```
+```{r}
+# Train AUC
+pred_lr_train <- predict(LR_lasso_mod, newx = x_train, s="lambda.min", type="response")
+roc_lr_train <- roc(y_train, pred_lr_train)
+auc_train_lr <- auc(roc_lr_train)
+
+# Test AUC
+roc_lr_test <- roc(y_test, pred_lr)
+auc_test_lr <- auc(roc_lr_test)
+
+cat("Training set AUC:", auc_train_lr, "\n")
+cat("Testing set AUC:", auc_test_lr, "\n")
+```
+
+
+https://xgboost.readthedocs.io/en/stable/R-package/xgboost_introduction.html#introduction
+```{r}
+#################################################################################
+########################### Baseline XGB Model###################################
 basic_params <- list(
     objective = "binary:logistic",
     eval_metric = "auc",
@@ -2046,30 +1763,25 @@ xgb_basic <- xgb.train(
 ```{r}
 # Simple evaluation of the baseline model
 pred_basic <- predict(xgb_basic, dtest)
-roc_basic <- roc(test_imp$prolonged_los, pred_basic)
+roc_basic <- roc(test_data$prolonged_los, pred_basic)
 auc_basic <- auc(roc_basic)
 cat("Baseline Test AUC:", auc_basic, "\n")
 ```
 
 ```{r}
-plot(roc_basic, col = "lightblue", main = "ROC Curve - Baseline Model")
-```
-
-### Fine-tuning
-```{r}
+#################################################################################
+##############################Fine-tuning########################################
 # Define parameters
 param_grid <- expand.grid(
-  max_depth = c(3L,4L),
-  eta = c(0.01,0.03),
+  max_depth = c(3L,4L, 5L),
+  eta = c(0.01,0.03, 0.05),
   subsample = c(0.7),
   colsample_bytree = c(0.7),
   min_child_weight = c(5,6),
-  gamma = c(2,3),
+  gamma = c(0, 1, 2, 3, 4, 5),
   KEEP.OUT.ATTRS = FALSE
 )
 ```
-
-
 
 ```{r}
 positive <- sum(train_data$prolonged_los == 1)
@@ -2077,6 +1789,7 @@ negative <- sum(train_data$prolonged_los == 0)
 scale_pos_weight <- negative/positive
 scale_pos_weight
 ```
+
 ```{r}
 best_auc <- 0
 best_params <- list()
@@ -2101,7 +1814,7 @@ for (i in 1:nrow(param_grid)){
     params = params,
     data = dtrain,
     nrounds = 1000,
-    nfold = 5,
+    nfold = 10,
     metrics = c("auc", "logloss"),
     early_stopping_rounds = 20,
     verbose = FALSE
@@ -2136,10 +1849,10 @@ xgb_best <- xgb.train(
 
 ```{r}
 pred_prob <- predict(xgb_best, dtest)
-pred_class <- ifelse(pred_prob >= 0.55, 1, 0)
-truth <- test_imp$prolonged_los
+pred_class <- ifelse(pred_prob >= 0.5, 1, 0)
+truth <- test_data$prolonged_los
 
-confusionMatrix(factor(pred_class), factor(truth))
+confusionMatrix(factor(pred_class), factor(truth), positive = "1")
 roc_obj <- roc(truth, pred_prob)
 plot(roc_obj, col = "lightblue")
 auc(roc_obj)
@@ -2147,5 +1860,291 @@ auc(roc_obj)
 
 
 
-"#E57373","#4DB6AC"
+```{r}
+###################################################################################
+##########################        AUROC      ######################################
+###################################################################################
+auc_calculate <- function(model_name, y_train, y_train_prob, y_test, y_test_prob){
+  
+  # Training set ROC
+  roc_train <- roc(y_train, y_train_prob, quiet = TRUE)
+  auc_train <- as.numeric(auc(roc_train))
+  auc_train_ci <- as.numeric(ci.auc(roc_train))
+  
+  # Testing set ROC
+  roc_test <- roc(y_test, y_test_prob, quiet = TRUE)
+  auc_test <- as.numeric(auc(roc_test))
+  auc_test_ci <- as.numeric(ci.auc(roc_test))
+  
+  tibble(
+    Model = model_name,
+    
+    `Train AUROC` = sprintf("%.3f (%.3f–%.3f)", auc_train, auc_train_ci[1], auc_train_ci[3]),
+    `Test AUROC`  = sprintf("%.3f (%.3f–%.3f)", auc_test,  auc_train_ci[1],  auc_train_ci[3])
+  )
+}
+```
+
+```{r}
+# LR baseline AUC
+auc_lr <- auc_calculate(
+  "LR",
+  y_train = y_train,
+  y_train_prob = as.numeric(pred_lr_train),
+  y_test = y_test,
+  y_test_prob = as.numeric(pred_lr)
+)
+```
+
+```{r}
+# XGB baseline AUC
+pred_basic_train <- predict(xgb_basic, dtrain)
+pred_basic <- predict(xgb_basic, dtest)
+auc_xgb_basic <- auc_calculate(
+  "XGB (Baseline)",
+  y_train = y_train,
+  y_train_prob = pred_basic_train,
+  y_test = truth,
+  y_test_prob = pred_basic
+)
+```
+
+
+```{r}
+# XGB fine-tuned AUC
+pred_prob_train <- predict(xgb_best, dtrain)
+pred_prob <- predict(xgb_best, dtest)
+auc_xgb_best <- auc_calculate(
+  "XGB (fine-tuned)",
+  y_train = y_train,
+  y_train_prob = pred_prob_train,
+  y_test = truth,
+  y_test_prob = pred_prob
+)
+```
+
+```{r}
+auc_table <-  bind_rows(
+  auc_lr,
+  auc_xgb_basic,
+  auc_xgb_best
+)
+
+auc_table_report <- auc_table %>%
+  gt::gt() |>
+  gt::tab_header(
+    title = gt::md("**AUROC Performance Summary**")
+  ) |>
+  gt::cols_label(
+    Model = "Model",
+    `Train AUROC` = "Train AUROC(95%CI)",
+    `Test AUROC` = "Test AUROC(95%CI)"
+  ) |>
+  gt::fmt_markdown(everything())
+
+auc_table_report
+```
+
+
+
+
+
+```{r}
+###################################################################################
+##########################       Model Performance     ############################
+###################################################################################
+performance_calculate <- function(model_name, y_true, y_prob, threshold = 0.5){
+  
+  y_true <- as.numeric(y_true)
+  y_pred <- ifelse(y_prob >= threshold, 1, 0)
+  
+  # Confusion matrix
+  TP <- sum(y_pred == 1 & y_true == 1)
+  TN <- sum(y_pred == 0 & y_true == 0)
+  FP <- sum(y_pred == 1 & y_true == 0)
+  FN <- sum(y_pred == 0 & y_true == 1)
+  
+  # CI
+  ci_binom <- function(successes, total){
+    if(total == 0) return(c(NA, NA))
+    out <- binom.test(successes, total)$conf.int
+    return(round(out, 3))
+  }
+  
+  # Metrics
+  accuracy     <- (TP + TN) / (TP + TN + FP + FN)
+  sensitivity  <- TP / (TP + FN)
+  specificity  <- TN / (TN + FP)
+  ppv          <- TP / (TP + FP)
+  npv          <- TN / (TN + FN)
+  
+  accuracy_CI    <- ci_binom(TP + TN, TP + TN + FP + FN)
+  sensitivity_CI <- ci_binom(TP, TP + FN)
+  specificity_CI <- ci_binom(TN, TN + FP)
+  ppv_CI         <- ci_binom(TP, TP + FP)
+  npv_CI         <- ci_binom(TN, TN + FN)
+  
+  combine_ci <- function(value, ci){
+    paste0(
+      round(value, 3),
+      " (",
+      ci[1], "–", ci[2],
+      ")"
+    )
+  }
+  
+  tibble(
+    Model = model_name,
+    `Accuracy(95% CI)` = combine_ci(accuracy, accuracy_CI),
+    `Sensitivity(95% CI)` = combine_ci(sensitivity, sensitivity_CI),
+    `Specificity(95% CI)` = combine_ci(specificity, specificity_CI),
+    `PPV(95% CI)` = combine_ci(ppv, ppv_CI),
+    `NPV(95% CI)` = combine_ci(npv, npv_CI)
+  )
+}
+
+```
+
+
+```{r}
+results_lr <- performance_calculate(
+  model_name = "LR",
+  y_true = y_test,
+  y_prob = as.numeric(pred_lr)
+)
+
+
+
+results_xgb_baseline <- performance_calculate(
+  model_name = "XGB(Baseline)",
+  y_true = y_test,
+  y_prob = pred_basic
+)
+
+results_xgb_ft <- performance_calculate(
+  model_name = "XGB(Fine-tuned)",
+  y_true = y_test,
+  y_prob = pred_prob
+)
+
+final_performance <- bind_rows(results_lr, results_xgb_baseline, results_xgb_ft)
+
+final_performance_report <- final_performance |>
+  gt::gt() |>
+  gt::tab_header(
+    title = gt::md("**Model Performance Summary**")
+  )|>
+  gt::fmt_markdown(everything())
+
+final_performance_report
+```
+
+
+```{r}
+calibration_data <- function(prob, truth, n_bins = 10){
+
+  # 转成 numeric，避免 factor/NULL 导致崩溃
+  prob  <- as.numeric(prob)
+  truth <- as.numeric(truth)
+
+  # 检查输入
+  if(length(prob) != length(truth)){
+    stop("prob and truth must have same length")
+  }
+  if(any(is.na(prob))){
+    warning("NA values detected in prob, removing...")
+    keep <- !is.na(prob)
+    prob  <- prob[keep]
+    truth <- truth[keep]
+  }
+
+  # 手动分箱（比 ntile 更稳）
+  bins <- cut(
+    prob,
+    breaks = quantile(prob, probs = seq(0, 1, length.out = n_bins + 1), na.rm = TRUE),
+    include.lowest = TRUE
+  )
+
+  df <- data.frame(
+    prob = prob,
+    truth = truth,
+    bin = bins
+  )
+
+  calib <- df %>%
+    group_by(bin) %>%
+    summarise(
+      mean_pred = mean(prob),
+      mean_obs  = mean(truth),
+      n = n(),
+      .groups = "drop"
+    )
+
+  return(calib)
+}
+
+cal_lr   <- calibration_data(pred_lr, truth)
+cal_base <- calibration_data(pred_basic, truth)
+cal_tune <- calibration_data(pred_prob, truth)
+
+```
+
+```{r}
+cal_lr$model   <- "Logistic Regression"
+cal_base$model <- "XGB (Baseline)"
+cal_tune$model <- "XGB (Fine-tuned)"
+
+cal_all <- bind_rows(cal_lr, cal_base, cal_tune)
+
+ggplot(cal_all, aes(x = mean_pred, y = mean_obs, color = model)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
+  scale_color_manual(values = c(
+    "Logistic Regression" = "#1f77b4",
+    "XGB (Baseline)" = "#ff7f0e",
+    "XGB (Fine-tuned)" = "#2ca02c"
+  )) +
+  labs(
+    title = "Calibration Curves for Three Models",
+    x = "Mean Predicted Probability",
+    y = "Observed Proportion"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.title = element_blank(),
+    plot.title = element_text(hjust = 0.5)
+  )
+
+```
+
+
+
+
+```{r}
+X_train <- as.matrix(train_data %>% select(-prolonged_los))
+```
+
+```{r}
+# Top 20 SHAP importance
+shap_imp <- shap_long |>
+  group_by(variable) |>
+  summarise(mean_abs_shap = mean(abs(value))) |>
+  arrange(desc(mean_abs_shap)) |>
+  head(20)
+
+# Plot the importance
+ggplot(shap_imp, aes(x = reorder(variable, mean_abs_shap), 
+                      y = mean_abs_shap)) +
+  geom_col(fill = "gray") +
+  coord_flip() +
+  labs(title = "Top 20 Features by Mean Absolute SHAP Value",
+       x = "Feature",
+       y = "Mean |SHAP value|") +
+  theme_minimal()
+```
+
+
+
+### Q2.3 Discussion
 
